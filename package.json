@@ -1,0 +1,35 @@
+{
+  "name": "telegram-wa-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram -> WhatsApp notification bridge with keyword filter and real WhatsApp mentions",
+  "main": "src/index.js",
+  "scripts": {
+    "setup": "node scripts/setup-check.js",
+    "start": "node src/index.js",
+    "dev": "node src/index.js",
+    "test": "node test/run-tests.js",
+    "tg:login": "node scripts/login-telegram.js",
+    "tg:chats": "node scripts/list-chats.js",
+    "tg:diag": "node scripts/diagnose-network.js",
+    "wa:reset": "node scripts/reset-wa-session.js",
+    "service:install": "node scripts/install-service.js",
+    "service:uninstall": "node scripts/uninstall-service.js",
+    "service:status": "node scripts/service-status.js",
+    "db:backup": "node scripts/backup-db.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.5.0",
+    "dotenv": "^16.4.5",
+    "node-telegram-bot-api": "^0.66.0",
+    "node-windows": "1.0.0-beta.8",
+    "qrcode": "^1.5.0",
+    "qrcode-terminal": "^0.12.0",
+    "telegram": "^2.0.0",
+    "whatsapp-web.js": "^1.26.0"
+  },
+  "license": "UNLICENSED"
+}

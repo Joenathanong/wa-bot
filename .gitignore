@@ -1,0 +1,34 @@
+# WhatsApp session & cache - NEVER commit
+.wwebjs_auth/
+.wwebjs_cache/
+
+# dependencies
+node_modules/
+
+# environment / credentials
+.env
+.env.local
+
+# database & runtime data
+data/
+*.db
+*.db-journal
+*.sqlite
+*.session
+telegram-user.session
+
+# logs
+logs/
+*.log
+npm-debug.log*
+
+# pm2
+.pm2/
+
+# windows service (node-windows)
+daemon/
+src/daemon/
+
+# os
+.DS_Store
+Thumbs.db
