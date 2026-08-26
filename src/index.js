@@ -9,6 +9,7 @@ const Pipeline = require('./pipeline');
 const AdminMenu = require('./admin');
 const TelegramService = require('./telegram');
 const TelegramUserSource = require('./telegram-user');
+const OcsScheduler = require('./ocs-scheduler');
 const { KEYWORD } = require('./filter');
 
 const startedAt = Date.now();
@@ -16,6 +17,7 @@ let db = null;
 let wa = null;
 let tg = null;
 let tgUser = null;
+let ocs = null;
 let shuttingDown = false;
 
 function banner() {
@@ -166,6 +168,20 @@ async function main() {
     }
   }
 
+
+  // 7. Laporan berkala Fulfilment Dashboard dari IEG OCS
+  if (config.ocs.enabled) {
+    ocs = new OcsScheduler({
+      db, whatsapp: wa, queue, config,
+      notifyAdmins: (teks) => tg.notifyAdmins(teks),
+    });
+    tg.ocs = ocs;
+    if (tg.admin) tg.admin.ocs = ocs;
+    ocs.start();
+  } else {
+    logger.info('Laporan OCS tidak aktif (OCS_ENABLED belum true di .env).');
+  }
+
   await wa.start();
 
   logger.info('Aplikasi berjalan. Kirim /admin ke bot Telegram Anda untuk membuka Admin Menu.');
@@ -176,6 +192,7 @@ async function shutdown(signal) {
   shuttingDown = true;
   logger.info(`Menerima ${signal}, mematikan aplikasi dengan rapi...`);
   try { if (tg && tg.pipeline) await tg.pipeline.flushFollowUp(); } catch (e) { /* ignore */ }
+  try { if (ocs) ocs.stop(); } catch (e) { /* ignore */ }
   try { if (tgUser) await tgUser.stop(); } catch (e) { /* ignore */ }
   try { if (tg) await tg.stop(); } catch (e) { /* ignore */ }
   try { if (wa) await wa.stop(); } catch (e) { /* ignore */ }

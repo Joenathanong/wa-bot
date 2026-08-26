@@ -172,6 +172,9 @@ class TelegramService {
           isAdmin ? '/admin   - buka Admin Menu' : '',
           isAdmin ? '/groups  - atur WhatsApp Group tujuan' : '',
           isAdmin ? '/wadiag  - diagnosa daftar group WhatsApp' : '',
+          isAdmin ? '/ocs     - kirim laporan Fulfilment Dashboard sekarang' : '',
+          isAdmin ? '/ocsstatus - status penjadwal laporan OCS' : '',
+          isAdmin ? '/ocson, /ocsoff - nyalakan / matikan laporan berkala' : '',
           '',
           isAdmin ? '' : 'Anda bukan administrator bot ini.',
         ].filter(Boolean).join('\n'));
@@ -237,6 +240,58 @@ class TelegramService {
       case '/keyword': {
         if (!this.config.isAdmin(userId)) return true;
         await this.bot.sendMessage(chatId, `🔎 Keyword filter:\n"${KEYWORD}"\n\n(case-insensitive, satu-satunya pemicu forwarding)`);
+        return true;
+      }
+
+      case '/ocs': {
+        if (!this.config.isAdmin(userId)) {
+          await this.bot.sendMessage(chatId, require('./admin').DENIED);
+          return true;
+        }
+        if (!this.ocs) {
+          await this.bot.sendMessage(chatId, 'Laporan OCS tidak aktif. Isi OCS_ENABLED=true di file .env lalu jalankan ulang aplikasi.');
+          return true;
+        }
+        await this.bot.sendMessage(chatId, 'Mengambil data dari OCS...');
+        const hasil = await this.ocs.runOnce({ paksa: true });
+        if (hasil.status === 'sent') {
+          await this.bot.sendMessage(chatId, `Laporan terkirim ke ${hasil.groups} group WhatsApp.\n\n${hasil.text}`);
+        } else if (hasil.text) {
+          await this.bot.sendMessage(chatId, `Tidak dikirim (${hasil.reason}). Isi laporan saat ini:\n\n${hasil.text}`);
+        } else {
+          await this.bot.sendMessage(chatId, `Laporan tidak dikirim - ${hasil.reason || hasil.status}`);
+        }
+        return true;
+      }
+
+      case '/ocsstatus': {
+        if (!this.config.isAdmin(userId)) {
+          await this.bot.sendMessage(chatId, require('./admin').DENIED);
+          return true;
+        }
+        if (!this.ocs) {
+          await this.bot.sendMessage(chatId, 'Laporan OCS tidak aktif (OCS_ENABLED belum true).');
+          return true;
+        }
+        await this.bot.sendMessage(chatId, this.ocs.ringkasanStatus());
+        return true;
+      }
+
+      case '/ocson':
+      case '/ocsoff': {
+        if (!this.config.isAdmin(userId)) {
+          await this.bot.sendMessage(chatId, require('./admin').DENIED);
+          return true;
+        }
+        if (!this.ocs) {
+          await this.bot.sendMessage(chatId, 'Laporan OCS tidak aktif (OCS_ENABLED belum true).');
+          return true;
+        }
+        const nyalakan = cmd === '/ocson';
+        this.ocs.setEnabled(nyalakan);
+        await this.bot.sendMessage(chatId, nyalakan
+          ? 'Laporan OCS DIAKTIFKAN. Pesan berikutnya dikirim sesuai jadwal.'
+          : 'Laporan OCS DIMATIKAN. Pakai /ocs untuk mengirim sekali secara manual.');
         return true;
       }
 

@@ -996,11 +996,25 @@ async function run() {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
 
   await test('seluruh dependency yang dipakai tercatat di package.json', () => {
+    const semua = Object.assign({}, pkg.dependencies, pkg.optionalDependencies);
     const wajib = ['whatsapp-web.js', 'node-telegram-bot-api', 'telegram', 'better-sqlite3',
       'dotenv', 'qrcode-terminal', 'qrcode', 'node-windows'];
     for (const d of wajib) {
-      assert.ok(pkg.dependencies[d], `${d} harus ada di dependencies agar npm ci memasangnya`);
+      assert.ok(semua[d], `${d} harus tercatat agar npm ci memasangnya`);
     }
+  });
+
+  await test('better-sqlite3 opsional agar npm ci tidak gagal total', () => {
+    assert.ok(pkg.optionalDependencies && pkg.optionalDependencies['better-sqlite3'],
+      'binary-nya belum tersedia untuk Node terbaru; kegagalan build tidak boleh membatalkan seluruh pemasangan');
+    assert.ok(!(pkg.dependencies || {})['better-sqlite3'],
+      'jangan tercatat di dua tempat');
+  });
+
+  await test('aplikasi punya driver SQLite pengganti', () => {
+    const dbSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'database.js'), 'utf8');
+    assert.ok(dbSrc.includes("require('node:sqlite')"), 'harus ada fallback ke modul bawaan Node');
+    assert.ok(dbSrc.includes("require('better-sqlite3')"), 'utamanya tetap better-sqlite3');
   });
 
   await test('node-windows dipatok versi persis (bukan rentang)', () => {
@@ -1012,15 +1026,21 @@ async function run() {
     assert.strictEqual(pkg.scripts.setup, 'node scripts/setup-check.js');
   });
 
+  await test('setup melaporkan driver SQLite yang benar-benar dipakai', () => {
+    assert.ok(setupSrc.includes('Driver SQLite yang dipakai'),
+      'pengguna harus tahu driver mana yang aktif, terutama di Node 24');
+    assert.ok(setupSrc.includes('optionalDependencies'), 'paket opsional tidak boleh dianggap gagal');
+  });
+
   await test('pemeriksaan mencakup semua yang bisa gagal di PC baru', () => {
     for (const bagian of ['cekNode', 'cekDependency', 'cekEnv', 'cekChrome', 'cekData', 'cekService']) {
       assert.ok(setupSrc.includes('function ' + bagian), 'harus memeriksa ' + bagian);
     }
   });
 
-  await test('memberi perintah winget, bukan sekadar menyatakan kurang', () => {
-    assert.ok(setupSrc.includes('winget install -e --id OpenJS.NodeJS.LTS'));
-    assert.ok(setupSrc.includes('winget install -e --id Google.Chrome'));
+  await test('memberi perintah konkret, bukan sekadar menyatakan kurang', () => {
+    assert.ok(setupSrc.includes('winget install -e --id Google.Chrome'), 'Chrome dipasang lewat winget');
+    assert.ok(setupSrc.includes('nodejs.org'), 'Node diarahkan ke unduhan versi 22, bukan "LTS" yang kini berarti 24');
     assert.ok(setupSrc.includes('npm ci'), 'menyarankan npm ci agar versi sama persis');
   });
 
@@ -1767,6 +1787,210 @@ async function run() {
   await tg.stop();
   await wa.stop();
   idb.close();
+
+
+  /* ------------------------- LAPORAN OCS -------------------------- *
+   * Seluruh uji di bawah ini murni offline: klien OCS diganti obyek
+   * palsu, WhatsApp diganti perekam. Tidak ada koneksi ke ocs.iegsystem.id.
+   * --------------------------------------------------------------- */
+
+  const OcsClient = require('../src/ocs-client');
+  const OcsScheduler = require('../src/ocs-scheduler');
+  const laporan = require('../src/ocs-report');
+  const Queue = require('../src/queue');
+
+  const CONTOH = {
+    filter: { dateType: 'dueDate', shop: 'All', channel: 'All', area: 'All' },
+    summary: {
+      TotalInTransit: 3, BreachedSla: 4, AtRiskSla: 2, AtRiskSla12: 5,
+      InstanBelumKirim: 1, NoDueTime: 0, CompletedInRange: 6576, AvgTotalCycleHours: 4.6935,
+    },
+    statusBuckets: [
+      { Key: 'awaiting_payment', Label: 'Awaiting Payment', Count: 503, SortOrder: 1 },
+      { Key: 'packing', Label: 'Packing', Count: 0, SortOrder: 2 },
+      { Key: 'manifest', Label: 'Manifest', Count: 12, SortOrder: 3 },
+    ],
+    aging: [
+      { Bucket: '0-2 jam', SortOrder: 1, Count: 1966, BreachedSla: 4 },
+      { Bucket: '2-6 jam', SortOrder: 2, Count: 0, BreachedSla: 0 },
+    ],
+    throughput: [
+      { Day: '2026-08-26', Role: 'manifester', TotalCount: 8104, CompletedCount: 8104 },
+      { Day: '2026-08-26', Role: 'packer', TotalCount: 2027, CompletedCount: 2027 },
+    ],
+    leaderboard: [
+      { Role: 'manifester', OperatorId: 'A', OperatorName: 'RICKY', TotalCount: 3751, CompletedCount: 3751 },
+      { Role: 'packer', OperatorId: 'B', OperatorName: 'mesin 01', TotalCount: 2027, CompletedCount: 2027 },
+    ],
+    cycle: [{
+      Day: '2026-08-26', Orders: 6576, AvgCreateToAssignHours: 3.918,
+      AvgAssignToPackHours: 1.265, AvgPackToManifestHours: 0.502,
+      AvgManifestToShipHours: 0.529, AvgTotalCycleHours: 4.693,
+    }],
+    errors: [],
+  };
+
+  await test('rentang "Hari Ini" memakai batas hari WIB, bukan UTC', () => {
+    const now = new Date('2026-08-26T04:20:00.000Z'); // 11:20 WIB
+    const r = laporan.todayRange(now, 420);
+    assert.strictEqual(r.from, '2026-08-25T17:00:00.000Z', 'from = 00:00 WIB hari ini');
+    assert.strictEqual(r.to, '2026-08-26T17:00:00.000Z', 'to = 00:00 WIB besok');
+  });
+
+  await test('rentang hari benar juga sesaat setelah tengah malam WIB', () => {
+    const now = new Date('2026-08-25T17:05:00.000Z'); // 00:05 WIB tanggal 26
+    const r = laporan.todayRange(now, 420);
+    assert.strictEqual(r.from, '2026-08-25T17:00:00.000Z');
+    assert.strictEqual(r.to, '2026-08-26T17:00:00.000Z');
+  });
+
+  await test('pesan laporan memuat angka SLA, WIP, throughput, dan cycle', () => {
+    const teks = laporan.renderReport(CONTOH, { now: new Date('2026-08-26T04:20:00.000Z'), tzOffsetMinutes: 420 });
+    assert.ok(teks.includes('26 Agu 2026'), 'tanggal lokal');
+    assert.ok(teks.includes('11:20 WIB'), 'jam lokal');
+    assert.ok(teks.includes('SLA terlewat: *4*'));
+    assert.ok(teks.includes('Awaiting Payment: 503'));
+    assert.ok(!teks.includes('Packing: 0'), 'tahap kosong tidak ditampilkan');
+    assert.ok(teks.includes('0-2 jam: 1.966 (4 lewat SLA)'));
+    assert.ok(teks.includes('manifester: 8.104'));
+    assert.ok(teks.includes('RICKY'));
+    assert.ok(teks.includes('4,7 jam'), 'rata-rata cycle dibulatkan');
+  });
+
+  await test('laporan tetap tersusun walau sebagian data gagal diambil', () => {
+    const rusak = { filter: {}, summary: null, statusBuckets: null, aging: null,
+      throughput: null, leaderboard: null, cycle: null, errors: ['summary: HTTP 500'] };
+    const teks = laporan.renderReport(rusak, { now: new Date('2026-08-26T04:20:00.000Z') });
+    assert.ok(teks.includes('SLA terlewat: *0*'), 'nilai kosong menjadi 0');
+    assert.ok(teks.includes('Sebagian data gagal diambil'), 'ada keterangan galat');
+  });
+
+  await test('decodeExp membaca klaim exp dari JWT', () => {
+    const payload = Buffer.from(JSON.stringify({ exp: 1787798143 })).toString('base64');
+    assert.strictEqual(OcsClient.decodeExp(`x.${payload}.y`), 1787798143);
+    assert.strictEqual(OcsClient.decodeExp('bukan-jwt'), 0);
+  });
+
+  await test('query string OCS di-encode dengan benar', () => {
+    const qs = OcsClient.buildQuery({ from: '2026-08-25T17:00:00.000Z', shop: 'All', kosong: null });
+    assert.ok(qs.includes('from=2026-08-25T17%3A00%3A00.000Z'));
+    assert.ok(qs.includes('shop=All'));
+    assert.ok(!qs.includes('kosong'), 'nilai null dibuang');
+  });
+
+  /* --- penjadwal: db & WhatsApp palsu, tanpa jaringan --- */
+  function dbPalsu(setting = {}) {
+    const store = { ...setting };
+    return {
+      listActiveWaGroups: () => [{ id: 1, group_id: '123@g.us', name: 'DAILY E-COMMERCE' }],
+      getSetting: (k, d = null) => (k in store ? store[k] : d),
+      setSetting: (k, v) => { store[k] = String(v); },
+      _store: store,
+    };
+  }
+  function configPalsu(extra = {}) {
+    return {
+      ocs: {
+        enabled: true, intervalMinutes: 60, alignToHour: false, activeHours: null,
+        tzOffsetMinutes: 420, tzLabel: 'WIB', dateType: 'dueDate', shop: 'All',
+        channel: 'All', area: 'All', shift: 'All', role: 'all', topOperators: 3,
+        judul: 'FULFILMENT DASHBOARD', onlyWhenProblem: false,
+        ambang: { breachedSla: 1, atRiskSla: 1, instan: 1 }, ...extra,
+      },
+    };
+  }
+
+  await test('penjadwal mengirim satu laporan ke tiap group aktif', async () => {
+    const terkirim = [];
+    const waPalsu = { isReady: () => true, sendText: async (gid, teks) => { terkirim.push({ gid, teks }); } };
+    const sched = new OcsScheduler({
+      db: dbPalsu(), whatsapp: waPalsu, queue: new Queue({ delayMs: 0 }),
+      config: configPalsu(),
+      client: { fetchFulfilment: async () => CONTOH },
+    });
+    const hasil = await sched.runOnce();
+    assert.strictEqual(hasil.status, 'sent');
+    assert.strictEqual(terkirim.length, 1, 'satu group aktif = satu pesan');
+    assert.strictEqual(terkirim[0].gid, '123@g.us');
+    assert.ok(terkirim[0].teks.includes('SLA terlewat'));
+  });
+
+  await test('penjadwal tidak mengirim saat WhatsApp belum siap', async () => {
+    const waPalsu = { isReady: () => false, sendText: async () => { throw new Error('tidak boleh dipanggil'); } };
+    const sched = new OcsScheduler({
+      db: dbPalsu(), whatsapp: waPalsu, queue: new Queue({ delayMs: 0 }),
+      config: configPalsu(), client: { fetchFulfilment: async () => CONTOH },
+    });
+    const hasil = await sched.runOnce();
+    assert.strictEqual(hasil.status, 'failed');
+    assert.ok(/belum tersambung/.test(hasil.reason));
+  });
+
+  await test('tombol mati di settings menghentikan pengiriman terjadwal', async () => {
+    const waPalsu = { isReady: () => true, sendText: async () => { throw new Error('tidak boleh dipanggil'); } };
+    const sched = new OcsScheduler({
+      db: dbPalsu({ ocs_enabled: '0' }), whatsapp: waPalsu, queue: new Queue({ delayMs: 0 }),
+      config: configPalsu(), client: { fetchFulfilment: async () => CONTOH },
+    });
+    const hasil = await sched.runOnce();
+    assert.strictEqual(hasil.status, 'skipped');
+    assert.strictEqual(hasil.reason, 'dimatikan');
+  });
+
+  await test('perintah manual (/ocs) menembus tombol mati dan jam aktif', async () => {
+    const terkirim = [];
+    const waPalsu = { isReady: () => true, sendText: async (gid, teks) => { terkirim.push(teks); } };
+    const sched = new OcsScheduler({
+      db: dbPalsu({ ocs_enabled: '0' }), whatsapp: waPalsu, queue: new Queue({ delayMs: 0 }),
+      config: configPalsu({ activeHours: { mulai: 3, sampai: 4 } }),
+      client: { fetchFulfilment: async () => CONTOH },
+    });
+    const hasil = await sched.runOnce({ paksa: true });
+    assert.strictEqual(hasil.status, 'sent');
+    assert.strictEqual(terkirim.length, 1);
+  });
+
+  await test('jam aktif dihitung dalam waktu lokal, termasuk yang melewati tengah malam', () => {
+    const buat = (jamAktif) => new OcsScheduler({
+      db: dbPalsu(), whatsapp: { isReady: () => true, sendText: async () => {} },
+      queue: new Queue({ delayMs: 0 }), config: configPalsu({ activeHours: jamAktif }),
+      client: { fetchFulfilment: async () => CONTOH },
+    });
+    const siang = buat({ mulai: 7, sampai: 21 });
+    assert.strictEqual(siang.dalamJamAktif(new Date('2026-08-26T04:20:00.000Z')), true, '11:20 WIB');
+    assert.strictEqual(siang.dalamJamAktif(new Date('2026-08-25T22:00:00.000Z')), false, '05:00 WIB');
+
+    const malam = buat({ mulai: 22, sampai: 6 });
+    assert.strictEqual(malam.dalamJamAktif(new Date('2026-08-25T22:00:00.000Z')), true, '05:00 WIB');
+    assert.strictEqual(malam.dalamJamAktif(new Date('2026-08-26T04:20:00.000Z')), false, '11:20 WIB');
+
+    const penuh = buat(null);
+    assert.strictEqual(penuh.dalamJamAktif(new Date()), true, 'tanpa batas jam');
+  });
+
+  await test('mode hanya-saat-bermasalah menahan laporan yang aman', async () => {
+    const aman = JSON.parse(JSON.stringify(CONTOH));
+    aman.summary.BreachedSla = 0; aman.summary.AtRiskSla = 0; aman.summary.InstanBelumKirim = 0;
+    const waPalsu = { isReady: () => true, sendText: async () => { throw new Error('tidak boleh dipanggil'); } };
+    const sched = new OcsScheduler({
+      db: dbPalsu(), whatsapp: waPalsu, queue: new Queue({ delayMs: 0 }),
+      config: configPalsu({ onlyWhenProblem: true }),
+      client: { fetchFulfilment: async () => aman },
+    });
+    const hasil = await sched.runOnce();
+    assert.strictEqual(hasil.status, 'skipped');
+    assert.ok(hasil.text, 'teks tetap tersedia untuk pemeriksaan manual');
+  });
+
+  await test('klien OCS tidak pernah menulis ke OCS (hanya GET dan endpoint Auth)', () => {
+    const kode = fs.readFileSync(path.join(__dirname, '..', 'src', 'ocs-client.js'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    const post = kode.match(/_request\('POST', '([^']+)'/g) || [];
+    for (const p of post) {
+      assert.ok(/\/Auth\/(Login|Refresh|Logout)/.test(p), `POST ke endpoint non-Auth: ${p}`);
+    }
+    assert.ok(!/'(PUT|DELETE|PATCH)'/.test(kode), 'tidak ada metode yang mengubah data');
+  });
 
   /* ------------------------------ hasil --------------------------- */
   console.log('\n==========================================');

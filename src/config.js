@@ -24,6 +24,18 @@ function toInt(raw, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** "7-21" -> {mulai:7, sampai:21}. Kosong / 0-24 berarti tanpa batas jam. */
+function parseHours(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  const m = s.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+  if (!m) return null;
+  const mulai = Math.min(23, Math.max(0, parseInt(m[1], 10)));
+  const sampai = Math.min(24, Math.max(0, parseInt(m[2], 10)));
+  if (mulai === 0 && (sampai === 24 || sampai === 0)) return null;
+  return { mulai, sampai: sampai === 24 ? 0 : sampai };
+}
+
 const adminIds = parseIdList(process.env.ADMIN_TELEGRAM_IDS);
 const allowedChatIds = parseIdList(process.env.TELEGRAM_ALLOWED_CHAT_IDS);
 
@@ -85,6 +97,44 @@ const config = {
   followUp: {
     windowMs: Math.max(0, toInt(process.env.FOLLOWUP_WINDOW_MS, 15000)),
     maxWaitMs: Math.max(1000, toInt(process.env.FOLLOWUP_MAX_WAIT_MS, 120000)),
+  },
+
+
+  // Laporan berkala dari IEG OCS (Fulfilment Dashboard).
+  ocs: {
+    enabled: String(process.env.OCS_ENABLED || 'false').toLowerCase() === 'true',
+    baseUrl: (process.env.OCS_BASE_URL || 'https://ocs.iegsystem.id').trim().replace(/\/+$/, ''),
+    username: (process.env.OCS_USERNAME || '').trim(),
+    password: process.env.OCS_PASSWORD || '',
+    database: (process.env.OCS_DATABASE || 'EJI_WMS').trim(),
+    timeoutMs: Math.max(5000, toInt(process.env.OCS_TIMEOUT_MS, 20000)),
+
+    intervalMinutes: Math.max(1, toInt(process.env.OCS_INTERVAL_MINUTES, 60)),
+    // true = laporan pertama menunggu pergantian jam supaya jatuh di menit :00
+    alignToHour: String(process.env.OCS_ALIGN_TO_HOUR || 'true').toLowerCase() !== 'false',
+    activeHours: parseHours(process.env.OCS_ACTIVE_HOURS),
+
+    tzOffsetMinutes: toInt(process.env.OCS_TZ_OFFSET_MINUTES, 420),
+    tzLabel: (process.env.OCS_TZ_LABEL || 'WIB').trim(),
+
+    // Filter dashboard - sama persis dengan yang ada di halaman web
+    dateType: (process.env.OCS_DATE_TYPE || 'dueDate').trim(),
+    shop: (process.env.OCS_SHOP || 'All').trim(),
+    channel: (process.env.OCS_CHANNEL || 'All').trim(),
+    area: (process.env.OCS_AREA || 'All').trim(),
+    shift: (process.env.OCS_SHIFT || 'All').trim(),
+    role: (process.env.OCS_ROLE || 'all').trim(),
+
+    topOperators: Math.max(0, toInt(process.env.OCS_TOP_OPERATORS, 3)),
+    judul: (process.env.OCS_TITLE || 'FULFILMENT DASHBOARD').trim(),
+
+    // true = kirim hanya bila ada kondisi yang perlu ditindak
+    onlyWhenProblem: String(process.env.OCS_ONLY_WHEN_PROBLEM || 'false').toLowerCase() === 'true',
+    ambang: {
+      breachedSla: toInt(process.env.OCS_ALERT_BREACHED_SLA, 1),
+      atRiskSla: toInt(process.env.OCS_ALERT_AT_RISK, 1),
+      instan: toInt(process.env.OCS_ALERT_INSTAN, 1),
+    },
   },
 
   healthCheckMs: Math.max(15000, toInt(process.env.HEALTH_CHECK_MS, 60000)),
@@ -150,6 +200,15 @@ const config = {
 
     if (!fs.existsSync(path.join(ROOT, '.env')) && !process.env.TELEGRAM_BOT_TOKEN) {
       errors.push('File .env tidak ditemukan. Salin .env.example menjadi .env terlebih dahulu.');
+    }
+
+if (config.ocs.enabled) {
+      if (!config.ocs.username || !config.ocs.password || !config.ocs.database) {
+        warnings.push('OCS_ENABLED=true tetapi OCS_USERNAME/OCS_PASSWORD/OCS_DATABASE belum lengkap - laporan OCS tidak akan berjalan.');
+      }
+      if (config.ocs.intervalMinutes < 5) {
+        warnings.push('OCS_INTERVAL_MINUTES di bawah 5 menit - laporan akan sangat sering. Pastikan ini disengaja.');
+      }
     }
 
     return { ok: errors.length === 0, errors, warnings };

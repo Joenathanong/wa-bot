@@ -41,30 +41,63 @@ function cekNode() {
   judul('Node.js');
   const versi = process.versions.node;
   const mayor = parseInt(versi.split('.')[0], 10);
-  if (mayor >= 20) ok(`Node ${versi}`);
-  else if (mayor >= 18) warn(`Node ${versi} - jalan, tetapi disarankan Node 20/22 LTS`);
-  else {
+
+  if (mayor < 18) {
     bad(`Node ${versi} terlalu lama. Perlu minimal 18, disarankan 22 LTS.`);
-    langkah.push('Pasang Node.js 22 LTS: winget install -e --id OpenJS.NodeJS.LTS');
+    langkah.push('Pasang Node.js 22 LTS dari https://nodejs.org/en/download (pilih 22.x)');
+    return;
+  }
+
+  if (mayor >= 24) {
+    ok(`Node ${versi}`);
+    warn('better-sqlite3 belum menyediakan binary siap pakai untuk Node ' + mayor + '.');
+    warn('  Pemasangannya boleh gagal - aplikasi otomatis memakai modul SQLite');
+    warn('  bawaan Node (node:sqlite). Tidak ada yang perlu dikerjakan.');
+    warn('  Ingin persis seperti mesin lama? Pasang Node 22 LTS.');
+  } else if (mayor >= 20) {
+    ok(`Node ${versi}`);
+  } else {
+    warn(`Node ${versi} - jalan, tetapi disarankan Node 22 LTS`);
   }
 }
 
 function cekDependency() {
   judul('Dependency');
-  const wajib = Object.keys(require('../package.json').dependencies || {});
+  const pkg = require('../package.json');
+  const wajib = Object.keys(pkg.dependencies || {});
+  const opsional = Object.keys(pkg.optionalDependencies || {});
+
   const hilang = [];
   for (const nama of wajib) {
-    try {
-      require.resolve(nama);
-    } catch (err) {
-      hilang.push(nama);
-    }
+    try { require.resolve(nama); } catch (err) { hilang.push(nama); }
   }
   if (hilang.length === 0) {
-    ok(`${wajib.length} paket terpasang`);
+    ok(`${wajib.length} paket wajib terpasang`);
   } else {
     bad('Belum terpasang: ' + hilang.join(', '));
     langkah.push('Pasang dependency: npm ci   (atau npm install bila belum ada package-lock.json)');
+  }
+
+  // Paket opsional boleh gagal - aplikasi punya jalan lain.
+  for (const nama of opsional) {
+    try {
+      require.resolve(nama);
+      ok(`${nama} terpasang (opsional)`);
+    } catch (err) {
+      warn(`${nama} tidak terpasang - opsional, aplikasi memakai penggantinya`);
+    }
+  }
+
+  // Driver SQLite mana yang sebenarnya akan dipakai?
+  let driver = null;
+  try { require('better-sqlite3'); driver = 'better-sqlite3'; } catch (err) { /* coba bawaan */ }
+  if (!driver) {
+    try { require('node:sqlite'); driver = 'node:sqlite (bawaan Node)'; } catch (err) { /* tidak ada */ }
+  }
+  if (driver) ok('Driver SQLite yang dipakai: ' + driver);
+  else {
+    bad('Tidak ada driver SQLite yang bisa dipakai');
+    langkah.push('Pasang Node 22 LTS (punya binary better-sqlite3) atau Node 22.5+ (punya node:sqlite bawaan)');
   }
 
   const lock = path.join(config.ROOT, 'package-lock.json');

@@ -28,10 +28,26 @@ Windows 10/11 modern sudah membawa `winget`. Buka **PowerShell sebagai
 Administrator** di PC baru, lalu:
 
 ```powershell
-winget install -e --id OpenJS.NodeJS.LTS
 winget install -e --id Google.Chrome
 winget install -e --id Git.Git          # opsional, untuk Git Bash
 ```
+
+**Node.js: pasang versi 22, bukan "LTS".** Sejak Node 24 menjadi LTS, perintah
+`winget ... OpenJS.NodeJS.LTS` memberi Node 24 — dan `better-sqlite3` belum
+menyediakan binary siap pakai untuk Node 24, sehingga `npm ci` mencoba
+mengompilasi dan gagal (butuh Python + Visual Studio Build Tools).
+
+Unduh installer **Node 22.x** dari <https://nodejs.org/en/download> (pilih
+versi 22 di daftar), atau lewat winget dengan versi eksplisit:
+
+```powershell
+winget install -e --id OpenJS.NodeJS.LTS --version 22.21.1
+```
+
+> Kalau terlanjur memakai Node 24, aplikasi **tetap jalan**: `better-sqlite3`
+> sekarang berstatus opsional, dan bila gagal dipasang, aplikasi otomatis
+> memakai modul SQLite bawaan Node (`node:sqlite`). Yang hilang hanya sedikit
+> kecepatan baca-tulis database — tidak terasa pada volume notifikasi ini.
 
 Tutup jendela itu, lalu buka terminal **baru** supaya PATH terbaca. Periksa:
 
@@ -75,6 +91,11 @@ npm run setup
 `npm ci` memasang **persis** versi yang terkunci di `package-lock.json`.
 (`npm install` boleh dipakai bila `package-lock.json` tidak terbawa, tetapi
 versinya bisa bergeser.)
+
+Peringatan `deprecated` dan laporan *vulnerabilities* boleh diabaikan. Kegagalan
+membangun `better-sqlite3` juga tidak masalah — paket itu opsional dan ada
+penggantinya. **Jangan** jalankan `npm audit fix --force`; itu merusak
+`whatsapp-web.js`.
 
 `npm run setup` memeriksa semuanya sekaligus — Node, dependency, `.env`,
 Chrome, database, sesi, dan status service — lalu menuliskan daftar apa yang
