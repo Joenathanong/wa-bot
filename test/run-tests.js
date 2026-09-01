@@ -2801,6 +2801,28 @@ async function run() {
     assert.ok(/tidak dikenal/.test(hasil.reason), hasil.reason);
   });
 
+  await test('laporan stok yang dilewati juga mencatat alasannya', async () => {
+    const s = new StockScheduler({
+      db: dbPalsu({ stock_enabled: '0' }), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: stockConfigPalsu(), client: clientStokPalsu(),
+    });
+    await s.runOnce();
+    assert.ok(s.lastSkip && /tombol MATI/.test(s.lastSkip.alasan));
+    assert.ok(/Terakhir dilewati:/.test(s.ringkasanStatus()));
+  });
+
+  await test('/stokstatus memperingatkan bila jam kirim masih kosong', () => {
+    const s = new StockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: stockConfigPalsu({ hours: [] }), client: clientStokPalsu(),
+    });
+    const teks = s.ringkasanStatus();
+    assert.ok(/jam kirim belum disetel/.test(teks), teks);
+    assert.ok(/stokjam/.test(teks));
+  });
+
   await test('laporan stok tidak dikirim saat WhatsApp belum siap', async () => {
     const s = new StockScheduler({
       db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
@@ -3253,6 +3275,77 @@ async function run() {
     });
     assert.strictEqual((await s.runOnce()).status, 'skipped');
     assert.strictEqual((await s.runOnce({ paksa: true })).status, 'sent');
+  });
+
+  /* --- kenapa jadwal diam padahal /lock berhasil --- */
+
+  await test('putaran terjadwal yang dilewati SELALU tercatat alasannya', async () => {
+    const s = new LockScheduler({
+      db: dbPalsu({ lock_enabled: '0' }), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    assert.strictEqual(s.lastSkip, null);
+    await s.runOnce();
+    assert.ok(s.lastSkip, 'harus mencatat alasannya, bukan diam');
+    assert.ok(/tombol MATI/.test(s.lastSkip.alasan), s.lastSkip.alasan);
+    assert.ok(/lockon/.test(s.lastSkip.alasan), 'alasannya harus menyebut cara memperbaikinya');
+  });
+
+  await test('/lockstatus menjelaskan kenapa jadwal tidak mengirim apa pun', async () => {
+    const s = new LockScheduler({
+      db: dbPalsu({ lock_enabled: '0' }), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    await s.runOnce();
+    const teks = s.ringkasanStatus();
+    assert.ok(teks.includes('Lock stock: MATI'));
+    assert.ok(/tombol sedang MATI/.test(teks), teks);
+    assert.ok(/Terakhir dilewati:/.test(teks), 'sebutkan kapan & kenapa dilewati');
+    assert.ok(/lockon/.test(teks));
+  });
+
+  await test('di luar jam aktif juga dicatat, bukan diam-diam', async () => {
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      // jam aktif 7-8 pagi saja; uji ini dijalankan di luar rentang itu
+      config: lockConfigPalsu({ activeHours: { mulai: 7, sampai: 8 } }),
+      client: clientLockPalsu(),
+    });
+    const palsuJam = new Date('2026-09-01T05:00:00.000Z');   // 12:00 WIB
+    s.dalamJamAktif = () => s.constructor.prototype.dalamJamAktif.call(s, palsuJam);
+    const hasil = await s.runOnce();
+    assert.strictEqual(hasil.status, 'skipped');
+    assert.ok(/jam aktif/.test(s.lastSkip.alasan), s.lastSkip.alasan);
+  });
+
+  await test('pemeriksaan PERTAMA datang beberapa menit setelah start, bukan satu jam', () => {
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: lockConfigPalsu({ firstRunMinutes: 3 }), client: clientLockPalsu(),
+    });
+    const pertama = s.jedaPertama();
+    assert.ok(pertama >= 3 * 60000 && pertama < 4 * 60000,
+      `${pertama / 60000} menit - harus 3-4 menit, bukan sejeda penuh`);
+    assert.ok(pertama < s.jedaBerikutnya(), 'putaran pertama jauh lebih cepat daripada jeda biasa');
+  });
+
+  await test('start() memasang jadwal dan mengumumkan keadaan tombolnya', () => {
+    const s = new LockScheduler({
+      db: dbPalsu({ lock_enabled: '0' }), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    assert.strictEqual(s.timer, null);
+    s.start();
+    assert.ok(s.timer, 'timer harus terpasang');
+    assert.ok(s.nextRunAt > Date.now(), 'waktu pemeriksaan berikutnya harus terisi');
+    assert.ok(s.ringkasanStatus().includes('Penjadwal: jalan'));
+    s.stop();
+    assert.strictEqual(s.timer, null);
   });
 
   await test('lock stock tidak dikirim saat WhatsApp belum siap', async () => {

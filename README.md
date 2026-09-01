@@ -1904,3 +1904,29 @@ lurus; tanpa itu font proporsional WhatsApp membuat angkanya bergeser.
 | PIC tidak menerima notifikasi | Nomornya belum diisi (`/lockwa`), atau nomornya bukan anggota group tersebut |
 | Kolom tabel tidak lurus | `LOCK_MONOSPACE=false`. Kembalikan ke `true` |
 | Pesan datang terlalu sering | Turunkan dengan `/lockjeda`, atau matikan pengulangan dengan `/lockulang off` |
+| **`/lock` berhasil tapi jadwal diam** | Hampir selalu tombolnya masih MATI. `/lock` memakai mode paksa sehingga menembus tombol; jadwal tidak. Jalankan `/lockstatus` - baris "Lock stock:" dan "Terakhir dilewati:" menjelaskannya, lalu `/lockon` |
+| Jadwal diam setelah service sering di-restart | Sudah tidak terjadi sejak `LOCK_FIRST_RUN_MINUTES` ada: pemeriksaan pertama datang ~3 menit setelah hidup, bukan satu jeda penuh |
+
+### 23.10 Kalau jadwal diam padahal `/lock` berhasil
+
+`/lock` berjalan dengan mode **paksa**: menembus tombol on/off dan jam
+aktif. Jadwal tidak. Jadi "manual bisa, otomatis tidak" hampir selalu
+berarti salah satu penjaga itu sedang menutup jalan.
+
+Jalankan `/lockstatus` dan baca tiga baris ini:
+
+```
+Lock stock: MATI              <- ini penyebabnya; /lockon
+Penjadwal: jalan              <- kalau TIDAK JALAN, LOCK_ENABLED belum true
+Terakhir dilewati: 14:03 WIB - tombol MATI - nyalakan dengan /lockon
+```
+
+Sejak versi ini, **setiap** putaran terjadwal yang memutuskan tidak
+mengirim menulis alasannya ke log:
+
+```
+[INFO ] [LOCK] Putaran terjadwal dilewati: tombol MATI - nyalakan dengan /lockon.
+```
+
+Sebelumnya baris itu tidak ada sama sekali - jadwal diam, log bersih,
+dan tidak ada satu pun petunjuk. Itu kelemahan yang sudah diperbaiki.

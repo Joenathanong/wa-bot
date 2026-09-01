@@ -57,6 +57,7 @@ class StockScheduler {
     this.lastRunAt = null;
     this.lastOkAt = null;
     this.lastError = null;
+    this.lastSkip = null;        // {waktu, alasan}
     this.stats = { runs: 0, sent: 0, failed: 0, skipped: 0 };
     this._cache = null;          // {kunci, penjualan, errors}
     this._groupTidakDikenal = [];
@@ -190,10 +191,19 @@ class StockScheduler {
         ? `Laporan stok dijadwalkan pukul ${o.hours.map((j) => `${String(j).padStart(2, '0')}:00`).join(', ')} ${o.tzLabel}.`
         : 'Laporan stok: belum ada jam kirim yang disetel.'
     );
+    if (o.hours.length > 0 && !this.enabled()) {
+      logger.warn('Tombol laporan stok sedang MATI - jam kirim tidak akan menghasilkan apa pun. '
+        + 'Nyalakan dengan /stokon.');
+    }
     this.timer = setInterval(() => {
       const tempo = this.jatuhTempo();
       if (!tempo) return;
-      if (!this.enabled()) return;
+      // Jam kirimnya sudah tiba. Kalau tetap tidak dikirim, katakan
+      // alasannya - jangan diam, karena gejalanya jadi tidak bisa dilacak.
+      if (!this.enabled()) {
+        this._catatDilewati('tombol MATI - nyalakan dengan /stokon');
+        return;
+      }
       if (this.db) this.db.setSetting(KUNCI.lastFired, tempo.kunci);
       this.runOnce().catch((err) => logger.error('Laporan stok gagal:', err.message));
     }, 60000);
@@ -214,6 +224,7 @@ class StockScheduler {
     }
     if (!paksa && !this.enabled()) {
       this.stats.skipped += 1;
+      this._catatDilewati('tombol MATI - nyalakan dengan /stokon');
       return { status: 'skipped', reason: 'dimatikan' };
     }
 
@@ -357,11 +368,28 @@ class StockScheduler {
     B.push(`Rata-rata: ${o.salesDays} hari, mode ${o.avgMode}`);
     B.push(`Tampilkan: ${o.top} SKU teratas`);
     B.push(`Group tujuan: ${o.groupIds.length === 0 ? 'semua group aktif' : o.groupIds.join(', ')}`);
+    B.push(`Penjadwal: ${this.timer ? 'jalan' : 'TIDAK JALAN'}`);
     B.push(`Terakhir dijalankan: ${this.lastRunAt ? jamLokal(new Date(this.lastRunAt), off, o.tzLabel) : '-'}`);
     B.push(`Terakhir berhasil: ${this.lastOkAt ? jamLokal(new Date(this.lastOkAt), off, o.tzLabel) : '-'}`);
+    if (this.lastSkip) {
+      B.push(`Terakhir dilewati: ${jamLokal(new Date(this.lastSkip.waktu), off, o.tzLabel)} - ${this.lastSkip.alasan}`);
+    }
+    if (o.hours.length === 0) {
+      B.push('');
+      B.push('CATATAN: jam kirim belum disetel, jadi tidak akan pernah terkirim otomatis.');
+      B.push('Setel dengan /stokjam 8,12,16');
+    } else if (!this.enabled()) {
+      B.push('');
+      B.push('CATATAN: tombol sedang MATI. Nyalakan jadwal dengan /stokon.');
+    }
     B.push(`Terkirim: ${this.stats.sent} | gagal: ${this.stats.failed} | dilewati: ${this.stats.skipped}`);
     if (this.lastError) B.push(`Galat terakhir: ${this.lastError}`);
     return B.join('\n');
+  }
+
+  _catatDilewati(alasan) {
+    this.lastSkip = { waktu: Date.now(), alasan };
+    logger.info(`Laporan stok dilewati: ${alasan}.`);
   }
 
   _notify(text) {

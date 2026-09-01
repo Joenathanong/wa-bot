@@ -227,6 +227,10 @@ const config = {
     enabled: String(process.env.LOCK_ENABLED || 'false').toLowerCase() === 'true',
 
     intervalMinutes: Math.max(5, toInt(process.env.LOCK_INTERVAL_MINUTES, 60)),
+    // Pemeriksaan PERTAMA setelah aplikasi hidup. Jangan disamakan dengan
+    // jeda penuh: service yang sering di-restart tidak akan pernah sampai
+    // ke pemeriksaan pertamanya kalau harus menunggu satu jam.
+    firstRunMinutes: Math.max(1, toInt(process.env.LOCK_FIRST_RUN_MINUTES, 3)),
     // Penyimpangan acak (menit) di sekitar jeda di atas, supaya permintaan
     // tidak jatuh di detik yang sama persis tiap jam. 0 = tepat waktu.
     jitterMinutes: Math.max(0, toInt(process.env.LOCK_JITTER_MINUTES, 7)),

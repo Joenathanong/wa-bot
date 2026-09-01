@@ -63,6 +63,7 @@ class LockScheduler {
     this.nextRunAt = null;
     this.lastError = null;
     this.lastRingkasan = '-';
+    this.lastSkip = null;        // {waktu, alasan} - kenapa putaran terjadwal tidak mengirim
     this.stats = { runs: 0, sent: 0, failed: 0, skipped: 0, alerts: 0 };
     this._rack = null;          // {waktu, peta}
   }
@@ -270,20 +271,40 @@ class LockScheduler {
     return Math.max(60000, dasar + geser + detik);
   }
 
+  /**
+   * Jeda untuk pemeriksaan PERTAMA setelah aplikasi hidup.
+   *
+   * Dulu putaran pertama menunggu satu jeda penuh. Akibatnya service yang
+   * sering di-restart (saat pemasangan, reboot harian, atau crash) TIDAK
+   * PERNAH sampai ke pemeriksaan pertamanya - jamnya selalu dimulai ulang
+   * dari nol. Sekarang pemeriksaan pertama datang beberapa menit setelah
+   * hidup, tetap digeser acak supaya polanya tidak seragam.
+   */
+  jedaPertama() {
+    const menit = Math.max(1, this.dasar.firstRunMinutes || 3);
+    return menit * 60000 + crypto.randomInt(0, 60) * 1000;
+  }
+
   start() {
     if (this.timer) return;
     const o = this.opsi();
+    const pertama = this.jedaPertama();
     logger.info(
       `Peringatan lock stock dijadwalkan tiap ${o.intervalMinutes} menit `
       + `(acak +/- ${o.jitterMinutes} menit)`
       + (o.activeHours ? `, jam aktif ${o.activeHours.mulai}:00-${o.activeHours.sampai}:00 ${o.tzLabel}` : ', 24 jam')
-      + '.'
+      + `. Tombol: ${this.enabled() ? 'AKTIF' : 'MATI'}`
+      + `. Pemeriksaan pertama dalam ${Math.round(pertama / 60000)} menit.`
     );
-    this._jadwalkan();
+    if (!this.enabled()) {
+      logger.warn('Tombol lock stock sedang MATI - pemeriksaan terjadwal tidak akan mengirim apa pun. '
+        + 'Nyalakan dengan /lockon.');
+    }
+    this._jadwalkan(pertama);
   }
 
-  _jadwalkan() {
-    const jeda = this.jedaBerikutnya();
+  _jadwalkan(jedaPaksa = null) {
+    const jeda = jedaPaksa === null ? this.jedaBerikutnya() : jedaPaksa;
     this.nextRunAt = Date.now() + jeda;
     logger.debug(`Pemeriksaan lock stock berikutnya dalam ${Math.round(jeda / 60000)} menit.`);
     this.timer = setTimeout(() => {
@@ -304,15 +325,22 @@ class LockScheduler {
   async runOnce({ paksa = false } = {}) {
     if (this.running) {
       this.stats.skipped += 1;
+      this._catatDilewati('putaran sebelumnya belum selesai');
       logger.warn('Pemeriksaan sebelumnya belum selesai - putaran ini dilewati.');
       return { status: 'skipped', reason: 'sedang berjalan' };
     }
+    // Setiap putaran terjadwal yang memutuskan TIDAK mengirim harus
+    // mengatakannya di log. Tanpa ini gejalanya membingungkan: /lock
+    // berhasil (karena paksa=true), jadwal diam, dan log bersih tanpa
+    // satu pun petunjuk.
     if (!paksa && !this.enabled()) {
       this.stats.skipped += 1;
+      this._catatDilewati('tombol MATI - nyalakan dengan /lockon');
       return { status: 'skipped', reason: 'dimatikan' };
     }
     if (!paksa && !this.dalamJamAktif()) {
       this.stats.skipped += 1;
+      this._catatDilewati('di luar jam aktif (LOCK_ACTIVE_HOURS)');
       return { status: 'skipped', reason: 'di luar jam aktif' };
     }
 
@@ -335,6 +363,7 @@ class LockScheduler {
       if (!paksa && this.opsi().onlyOnChange && this.db
           && this.db.getSetting(KUNCI.sidikJari, '') === sidik) {
         this.stats.skipped += 1;
+        this._catatDilewati(`isi peringatan sama seperti kiriman terakhir (${this.lastRingkasan})`);
         logger.info(`Daftar SKU ter-lock tidak berubah (${this.lastRingkasan}) - pesan tidak diulang.`);
         return { status: 'skipped', reason: 'tidak ada perubahan', ringkasan: this.lastRingkasan };
       }
@@ -498,13 +527,27 @@ class LockScheduler {
       B.push(`  ${shop}: ${isi}`);
     }
     B.push('');
+    B.push(`Penjadwal: ${this.timer ? 'jalan' : 'TIDAK JALAN'}`);
     B.push(`Terakhir diperiksa: ${jam(this.lastRunAt)}`);
     B.push(`Terakhir berhasil: ${jam(this.lastOkAt)}`);
     B.push(`Pemeriksaan berikutnya: ${jam(this.nextRunAt)}`);
+    if (this.lastSkip) {
+      B.push(`Terakhir dilewati: ${jam(this.lastSkip.waktu)} - ${this.lastSkip.alasan}`);
+    }
+    if (!this.enabled()) {
+      B.push('');
+      B.push('CATATAN: tombol sedang MATI, jadi jadwal tidak akan mengirim apa pun.');
+      B.push('/lock tetap bisa dipakai manual. Nyalakan jadwal dengan /lockon.');
+    }
     B.push(`Temuan terakhir: ${this.lastRingkasan}`);
     B.push(`Terkirim: ${this.stats.sent} putaran / ${this.stats.alerts} pesan | gagal: ${this.stats.failed} | dilewati: ${this.stats.skipped}`);
     if (this.lastError) B.push(`Galat terakhir: ${this.lastError}`);
     return B.join('\n');
+  }
+
+  _catatDilewati(alasan) {
+    this.lastSkip = { waktu: Date.now(), alasan };
+    logger.info(`Putaran terjadwal dilewati: ${alasan}.`);
   }
 
   _notify(text) {
