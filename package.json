@@ -17,7 +17,9 @@
     "service:install": "node scripts/install-service.js",
     "service:uninstall": "node scripts/uninstall-service.js",
     "service:status": "node scripts/service-status.js",
-    "db:backup": "node scripts/backup-db.js"
+    "db:backup": "node scripts/backup-db.js",
+    "stock:test": "node scripts/stock-test.js",
+    "lock:test": "node scripts/lock-test.js"
   },
   "engines": {
     "node": ">=18.0.0"

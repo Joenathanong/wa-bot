@@ -12,7 +12,7 @@
 const path = require('path');
 const config = require(path.join(__dirname, '..', 'src', 'config'));
 const OcsClient = require(path.join(__dirname, '..', 'src', 'ocs-client'));
-const { renderReport, todayRange } = require(path.join(__dirname, '..', 'src', 'ocs-report'));
+const { renderReport, todayRange, monthToDateRange, hitungHariKalender } = require(path.join(__dirname, '..', 'src', 'ocs-report'));
 
 const RAW = process.argv.includes('--raw');
 
@@ -87,18 +87,74 @@ async function main() {
     for (const e of data.errors) console.log('  !', e);
   }
 
+  /* --- peringkat operator: rentang bulan berjalan --- */
+  if (String(o.leaderboard.period).toLowerCase() === 'month') {
+    garis('3. PERINGKAT OPERATOR (BULAN BERJALAN)');
+    const rb = monthToDateRange(new Date(), o.tzOffsetMinutes);
+    console.log('from :', rb.from);
+    console.log('to   :', rb.to);
+    data.bulan = await client.fetchOperatorRange({
+      from: rb.from, to: rb.to,
+      shop: o.shop, channel: o.channel, area: o.area, shift: o.shift,
+    });
+
+    const semua = Array.isArray(data.bulan.leaderboard) ? data.bulan.leaderboard : [];
+    const peranAda = [...new Set(semua.map((x) => x.Role))];
+    console.log('Baris leaderboard :', semua.length);
+    console.log('Peran yang ADA    :', peranAda.join(', ') || '(kosong)');
+    console.log('Peran yang DIMINTA:', o.leaderboard.roles.join(', ') || '(semua)');
+    const tidakCocok = o.leaderboard.roles.filter(
+      (r) => !peranAda.some((a) => String(a).toLowerCase() === r.toLowerCase()));
+    if (tidakCocok.length > 0) {
+      console.log('  ! Peran berikut tidak ditemukan di data:', tidakCocok.join(', '));
+      console.log('    Perbaiki OCS_LEADERBOARD_ROLES di .env sesuai daftar "Peran yang ADA".');
+    }
+    console.log('Dikecualikan      :', o.leaderboard.exclude.join(', ') || '(tidak ada)');
+    for (const e of data.bulan.errors) console.log('  !', e);
+
+    /* ---- DIAGNOSA PEMBAGI: apakah Throughput mencakup seluruh bulan? ---- */
+    const tp = Array.isArray(data.bulan.throughput) ? data.bulan.throughput : [];
+    const hariSemua = [...new Set(tp.map((x) => String(x.Day || '').slice(0, 10)))].sort();
+    console.log('');
+    console.log('  -- pembagi rata-rata --');
+    console.log('  Baris throughput   :', tp.length);
+    console.log('  Rentang tanggalnya :', hariSemua.length ? `${hariSemua[0]} s/d ${hariSemua[hariSemua.length - 1]}` : '(kosong)');
+    console.log('  Hari berbeda       :', hariSemua.length);
+    console.log('  Hari kalender 1-hari ini :', hitungHariKalender(new Date(), o.tzOffsetMinutes, o.leaderboard.offDays));
+
+    for (const peran of o.leaderboard.roles) {
+      const sama = (a) => String(a || '').toLowerCase() === peran.toLowerCase();
+      const hariPeran = [...new Set(tp.filter((x) => sama(x.Role) && Number(x.CompletedCount) > 0)
+        .map((x) => String(x.Day || '').slice(0, 10)))];
+      const totalTp = tp.filter((x) => sama(x.Role))
+        .reduce((n, x) => n + (Number(x.CompletedCount) || 0), 0);
+      const totalLb = semua.filter((x) => sama(x.Role))
+        .reduce((n, x) => n + (Number(x.CompletedCount) || 0), 0);
+      const selisih = totalLb > 0 ? Math.round((totalTp / totalLb) * 100) : 0;
+      console.log(`  [${peran}] hari operasi ${hariPeran.length} | total throughput ${totalTp.toLocaleString('id-ID')}`
+        + ` | total leaderboard ${totalLb.toLocaleString('id-ID')} (${selisih}%)`);
+    }
+    console.log('');
+    console.log('  Bila persentase di atas jauh di bawah 100%, artinya Throughput hanya');
+    console.log('  mengembalikan sebagian hari sedangkan Leaderboard mencakup sebulan penuh.');
+    console.log('  Dalam kasus itu setel OCS_LEADERBOARD_DAYS=calendar (atau angka tetap)');
+    console.log('  di .env supaya rata-rata harian tidak menggelembung.');
+  }
+
   if (RAW) {
     garis('JSON MENTAH');
     console.log(JSON.stringify(data, null, 2));
   }
 
-  garis('3. PESAN YANG AKAN DIKIRIM KE WHATSAPP');
+  garis('4. PESAN YANG AKAN DIKIRIM KE WHATSAPP');
   const teks = renderReport(data, {
     now: new Date(),
     tzOffsetMinutes: o.tzOffsetMinutes,
     tzLabel: o.tzLabel,
     topOperators: o.topOperators,
     judul: o.judul,
+    leaderboardRoles: o.leaderboard.roles,
+    leaderboardExclude: o.leaderboard.exclude,
   });
   console.log('');
   console.log(teks);

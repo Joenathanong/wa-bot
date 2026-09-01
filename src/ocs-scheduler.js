@@ -2,7 +2,7 @@
 
 const logger = require('./logger').scope('OCS');
 const OcsClient = require('./ocs-client');
-const { renderReport, todayRange, jamLokal } = require('./ocs-report');
+const { renderReport, todayRange, monthToDateRange, jamLokal } = require('./ocs-report');
 
 /**
  * Penjadwal laporan Fulfilment Dashboard.
@@ -65,8 +65,43 @@ class OcsScheduler {
     return jam >= mulai || jam < sampai;   // rentang melewati tengah malam
   }
 
+  /**
+   * Group tujuan laporan.
+   *
+   * OCS_GROUP_IDS kosong -> semua WhatsApp Group yang AKTIF (sama dengan
+   * tujuan peringatan Telegram).
+   *
+   * OCS_GROUP_IDS diisi -> hanya group tersebut, dan group itu TIDAK harus
+   * aktif. Dengan begitu sebuah group khusus laporan dapat menerima laporan
+   * per jam tanpa ikut menerima peringatan stok: cukup daftarkan lewat
+   * Admin Menu lalu matikan tombolnya (⚪), atau tulis langsung JID-nya di sini
+   * walau belum pernah didaftarkan.
+   */
   targetGroups() {
-    return this.db.listActiveWaGroups().map((g) => ({ id: g.group_id, name: g.name || g.group_id }));
+    const pilihan = this.opsi.groupIds || [];
+    if (pilihan.length === 0) {
+      return this.db.listActiveWaGroups()
+        .map((g) => ({ id: g.group_id, name: g.name || g.group_id }));
+    }
+
+    const semua = this.db.listWaGroups()
+      .map((g) => ({ id: g.group_id, name: g.name || g.group_id }));
+
+    const hasil = [];
+    const tidakDikenal = [];
+    for (const p of pilihan) {
+      const cocok = semua.find((g) => g.id === p
+        || String(g.name).toLowerCase() === p.toLowerCase());
+      if (cocok) {
+        hasil.push(cocok);
+      } else if (/@g\.us$/i.test(p)) {
+        hasil.push({ id: p, name: p });   // JID langsung, belum terdaftar
+      } else {
+        tidakDikenal.push(p);
+      }
+    }
+    this._groupTidakDikenal = tidakDikenal;
+    return hasil;
   }
 
   /* ---------------------------- penjadwal -------------------------- */
@@ -165,8 +200,9 @@ class OcsScheduler {
   }
 
   async ambilData() {
-    const { from, to } = todayRange(new Date(), this.opsi.tzOffsetMinutes);
-    return this.client.fetchFulfilment({
+    const sekarang = new Date();
+    const { from, to } = todayRange(sekarang, this.opsi.tzOffsetMinutes);
+    const data = await this.client.fetchFulfilment({
       from,
       to,
       dateType: this.opsi.dateType,
@@ -176,6 +212,22 @@ class OcsScheduler {
       shift: this.opsi.shift,
       role: this.opsi.role,
     });
+
+    // Peringkat operator memakai rentang tersendiri: bulan berjalan.
+    const lb = this.opsi.leaderboard || {};
+    if (String(lb.period || '').toLowerCase() === 'month'
+        && typeof this.client.fetchOperatorRange === 'function') {
+      const bulan = monthToDateRange(sekarang, this.opsi.tzOffsetMinutes);
+      data.bulan = await this.client.fetchOperatorRange({
+        from: bulan.from,
+        to: bulan.to,
+        shop: this.opsi.shop,
+        channel: this.opsi.channel,
+        area: this.opsi.area,
+        shift: this.opsi.shift,
+      });
+    }
+    return data;
   }
 
   susunPesan(data) {
@@ -185,13 +237,20 @@ class OcsScheduler {
       tzLabel: this.opsi.tzLabel,
       topOperators: this.opsi.topOperators,
       judul: this.opsi.judul,
+      leaderboardRoles: (this.opsi.leaderboard || {}).roles || [],
+      leaderboardExclude: (this.opsi.leaderboard || {}).exclude || [],
+      leaderboardDays: (this.opsi.leaderboard || {}).days || 'auto',
+      leaderboardOffDays: (this.opsi.leaderboard || {}).offDays || [],
     });
   }
 
   async kirim(teks) {
     const groups = this.targetGroups();
     if (groups.length === 0) {
-      throw new Error('belum ada WhatsApp Group aktif (buka /groups)');
+      throw new Error((this.opsi.groupIds || []).length > 0
+        ? `OCS_GROUP_IDS tidak dikenal: ${(this._groupTidakDikenal || this.opsi.groupIds).join(', ')}. `
+          + 'Isi dengan JID (contoh 1203...@g.us) atau nama group yang sudah terdaftar di /groups.'
+        : 'belum ada WhatsApp Group aktif (buka /groups)');
     }
     if (!this.wa.isReady()) {
       throw new Error('WhatsApp belum tersambung');

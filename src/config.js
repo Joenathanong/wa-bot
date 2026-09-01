@@ -36,6 +36,19 @@ function parseHours(raw) {
   return { mulai, sampai: sampai === 24 ? 0 : sampai };
 }
 
+/**
+ * "8,12,16" -> [8,12,16] (jam lokal, sudah urut & tanpa duplikat).
+ * Variabel yang DITULIS tetapi dikosongkan berarti "tidak ada jadwal",
+ * bukan "pakai bawaan" - supaya jadwal benar-benar bisa dimatikan dari .env.
+ */
+function parseJamList(raw, bawaan) {
+  const sumber = String(raw === undefined || raw === null ? bawaan : raw);
+  const jam = sumber.split(',')
+    .map((s) => parseInt(String(s).trim(), 10))
+    .filter((n) => Number.isFinite(n) && n >= 0 && n <= 23);
+  return Array.from(new Set(jam)).sort((a, b) => a - b);
+}
+
 const adminIds = parseIdList(process.env.ADMIN_TELEGRAM_IDS);
 const allowedChatIds = parseIdList(process.env.TELEGRAM_ALLOWED_CHAT_IDS);
 
@@ -90,6 +103,11 @@ const config = {
   catchUp: {
     limit: toInt(process.env.CATCHUP_LIMIT, 25),
     maxAgeMinutes: toInt(process.env.CATCHUP_MAX_AGE_MINUTES, 180),
+    // Setelah mati listrik / restart: hanya pesan TERAKHIR yang memenuhi
+    // kriteria dan belum pernah terkirim yang diteruskan. Pesan lama yang
+    // juga memenuhi kriteria ditandai terproses (dilewati), bukan dikirim
+    // beruntun. Setel false untuk kembali ke perilaku lama (kirim semua).
+    onlyLatest: String(process.env.CATCHUP_ONLY_LATEST || 'true').toLowerCase() !== 'false',
   },
 
   // Pengelompokan pesan follow-up: peringatan yang terpecah menjadi beberapa
@@ -109,6 +127,11 @@ const config = {
     database: (process.env.OCS_DATABASE || 'EJI_WMS').trim(),
     timeoutMs: Math.max(5000, toInt(process.env.OCS_TIMEOUT_MS, 20000)),
 
+    // Kosong = kirim ke SEMUA WhatsApp Group yang aktif (perilaku bawaan).
+    // Diisi = hanya ke group ini. Boleh JID (120...@g.us) atau nama group,
+    // dipisah koma. Berguna bila laporan dashboard tidak untuk semua group.
+    groupIds: parseIdList(process.env.OCS_GROUP_IDS),
+
     intervalMinutes: Math.max(1, toInt(process.env.OCS_INTERVAL_MINUTES, 60)),
     // true = laporan pertama menunggu pergantian jam supaya jatuh di menit :00
     alignToHour: String(process.env.OCS_ALIGN_TO_HOUR || 'true').toLowerCase() !== 'false',
@@ -125,7 +148,27 @@ const config = {
     shift: (process.env.OCS_SHIFT || 'All').trim(),
     role: (process.env.OCS_ROLE || 'all').trim(),
 
-    topOperators: Math.max(0, toInt(process.env.OCS_TOP_OPERATORS, 3)),
+    topOperators: Math.max(0, toInt(process.env.OCS_TOP_OPERATORS, 10)),
+
+    // Peringkat operator
+    leaderboard: {
+      // month = rata-rata per hari sepanjang bulan berjalan (tanggal 1 s/d hari ini)
+      // today = hanya hari ini
+      period: (process.env.OCS_LEADERBOARD_PERIOD || 'month').trim().toLowerCase(),
+      // Peran yang dihitung. Kosongkan untuk semua peran.
+      roles: parseIdList(process.env.OCS_LEADERBOARD_ROLES || 'packer,picker'),
+      // Buang operator yang namanya MEMUAT kata ini - untuk menyingkirkan
+      // akun non-manusia seperti mesin packing dan akun SYSTEM.
+      exclude: parseIdList(process.env.OCS_LEADERBOARD_EXCLUDE || 'mesin,system'),
+      // Pembagi rata-rata harian:
+      //   auto     = hari yang ada datanya di Throughput
+      //   calendar = tanggal 1 s/d hari ini, dikurangi OCS_LEADERBOARD_OFFDAYS
+      //   <angka>  = dipakai apa adanya
+      days: (process.env.OCS_LEADERBOARD_DAYS || 'auto').trim().toLowerCase(),
+      // Hari libur mingguan untuk mode calendar. 0=Minggu ... 6=Sabtu
+      offDays: parseIdList(process.env.OCS_LEADERBOARD_OFFDAYS)
+        .map((n) => parseInt(n, 10)).filter((n) => Number.isFinite(n) && n >= 0 && n <= 6),
+    },
     judul: (process.env.OCS_TITLE || 'FULFILMENT DASHBOARD').trim(),
 
     // true = kirim hanya bila ada kondisi yang perlu ditindak
@@ -136,6 +179,86 @@ const config = {
       instan: toInt(process.env.OCS_ALERT_INSTAN, 1),
     },
   },
+
+  // Laporan "Stok Menipis" - Stocks > View V2 + Report > Order > Sku.
+  // Seluruh nilai di bawah bisa ditimpa lewat Menu Admin Telegram dan
+  // tersimpan di database, jadi .env hanya menentukan nilai awal.
+  stock: {
+    enabled: String(process.env.STOCK_ENABLED || 'false').toLowerCase() === 'true',
+
+    // Jam kirim (waktu lokal). Kosong = tidak pernah terkirim otomatis.
+    hours: parseJamList(process.env.STOCK_HOURS, '8,12,16'),
+
+    // Kosong = semua WhatsApp Group aktif. Diisi = hanya group ini
+    // (JID 120...@g.us atau nama group, dipisah koma).
+    groupIds: parseIdList(process.env.STOCK_GROUP_IDS),
+
+    // Kriteria penyaringan di halaman View V2
+    ambang: Math.max(0, toInt(process.env.STOCK_THRESHOLD, 1000)),
+    kategori: (process.env.STOCK_CATEGORY || 'Sku').trim(),
+    hanyaAktif: String(process.env.STOCK_ACTIVE_ONLY || 'true').toLowerCase() !== 'false',
+    area: (process.env.STOCK_AREA || '').trim(),
+
+    // Jendela penjualan untuk Avg Daily Sales
+    salesDays: Math.max(7, toInt(process.env.STOCK_SALES_DAYS, 90)),
+    // OCS menjawab 504 bila diminta 90 hari sekaligus - dipecah per potong.
+    chunkDays: Math.max(1, toInt(process.env.STOCK_CHUNK_DAYS, 30)),
+    platform: (process.env.STOCK_PLATFORM || 'All').trim(),
+    shop: (process.env.STOCK_SHOP || 'All').trim(),
+
+    // winsor = semua hari ikut, lonjakan ekstrem dibatasi persentil (bawaan)
+    // full   = semua hari, tanpa batas
+    // normal = buang payday & double date
+    // median = median harian
+    avgMode: (process.env.STOCK_AVG_MODE || 'winsor').trim().toLowerCase(),
+    persentil: Math.min(100, Math.max(50, toInt(process.env.STOCK_PERCENTILE, 95))),
+    paydayMulai: Math.min(28, Math.max(1, toInt(process.env.STOCK_PAYDAY_FROM, 25))),
+
+    top: Math.max(1, toInt(process.env.STOCK_TOP, 20)),
+    detail: String(process.env.STOCK_SHOW_DETAIL || 'true').toLowerCase() !== 'false',
+    judul: (process.env.STOCK_TITLE || 'STOK MENIPIS').trim(),
+  },
+
+  // Peringatan LOCK STOCK - SKU dengan ReserveQty > AvailableQty.
+  // Berjalan sebagai penjadwal sendiri, terpisah dari jalur Telegram
+  // maupun dari laporan OCS/stok. Hampir semua nilai bisa diubah lewat
+  // Menu Admin Telegram dan tersimpan di database.
+  lock: {
+    enabled: String(process.env.LOCK_ENABLED || 'false').toLowerCase() === 'true',
+
+    intervalMinutes: Math.max(5, toInt(process.env.LOCK_INTERVAL_MINUTES, 60)),
+    // Penyimpangan acak (menit) di sekitar jeda di atas, supaya permintaan
+    // tidak jatuh di detik yang sama persis tiap jam. 0 = tepat waktu.
+    jitterMinutes: Math.max(0, toInt(process.env.LOCK_JITTER_MINUTES, 7)),
+    activeHours: parseHours(process.env.LOCK_ACTIVE_HOURS),
+
+    // Kosong = semua WhatsApp Group aktif. Boleh JID atau nama group.
+    groupIds: parseIdList(process.env.LOCK_GROUP_IDS),
+
+    // Daftar shop yang dikenal, dipakai juga untuk menebak shop dari
+    // nama SKU bila belum terdaftar di Master Sku Rack.
+    shops: parseIdList(process.env.LOCK_SHOPS || 'NCO,Hanasui,FYNE,EOMMA'),
+
+    // Penyaringan tambahan di sisi OCS. Kosong = semua kategori/area.
+    hanyaAktif: String(process.env.LOCK_ACTIVE_ONLY || 'true').toLowerCase() !== 'false',
+    kategori: (process.env.LOCK_CATEGORY || '').trim(),
+    area: (process.env.LOCK_AREA || '').trim(),
+
+    // Master Sku Rack jarang berubah - disimpan sementara sekian menit.
+    rackCacheMinutes: Math.max(1, toInt(process.env.LOCK_RACK_CACHE_MINUTES, 180)),
+
+    // true = kirim hanya bila daftar SKU-nya BERUBAH sejak kiriman terakhir,
+    // supaya PIC tidak menerima pesan identik tiap jam.
+    onlyOnChange: String(process.env.LOCK_ONLY_ON_CHANGE || 'false').toLowerCase() === 'true',
+
+    monospace: String(process.env.LOCK_MONOSPACE || 'true').toLowerCase() !== 'false',
+    maxSku: Math.max(10, toInt(process.env.LOCK_MAX_SKU_WIDTH, 34)),
+    maxBaris: Math.max(1, toInt(process.env.LOCK_MAX_ROWS, 40)),
+  },
+
+  // Tenggat proses berhenti. Melewati ini -> keluar paksa, supaya
+  // `net stop` pada Windows Service tidak pernah macet karena Chrome.
+  shutdownTimeoutMs: Math.max(3000, toInt(process.env.SHUTDOWN_TIMEOUT_MS, 10000)),
 
   healthCheckMs: Math.max(15000, toInt(process.env.HEALTH_CHECK_MS, 60000)),
 

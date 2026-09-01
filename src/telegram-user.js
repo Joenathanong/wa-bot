@@ -259,10 +259,19 @@ class TelegramUserSource extends EventEmitter {
    * melalui pipeline. Proteksi duplikat di database memastikan pesan yang
    * sudah pernah diteruskan tidak dikirim dua kali, jadi aman dipanggil
    * setiap kali koneksi pulih maupun setiap aplikasi dijalankan.
+   *
+   * MODE "hanya yang terakhir" (CATCHUP_ONLY_LATEST=true, bawaan):
+   * setelah mati listrik / restart, hanya SATU pesan per chat yang dikirim,
+   * yaitu pesan TERBARU yang memenuhi kriteria dan belum pernah terkirim.
+   * Peringatan lama yang juga memenuhi kriteria ditandai terproses supaya
+   * tidak membanjiri WhatsApp Group dengan data yang sudah basi.
    */
   async catchUp(options = {}) {
     const limit = Number(options.limit || this.config.catchUp.limit);
     const maxAgeMinutes = Number(options.maxAgeMinutes || this.config.catchUp.maxAgeMinutes);
+    const hanyaTerakhir = options.onlyLatest !== undefined
+      ? Boolean(options.onlyLatest)
+      : this.config.catchUp.onlyLatest !== false;
     if (limit <= 0 || maxAgeMinutes <= 0) return 0;
 
     const chats = this.config.telegram.allowedChatIds;
@@ -282,19 +291,46 @@ class TelegramUserSource extends EventEmitter {
     const cutoff = Date.now() - maxAgeMinutes * 60000;
     let forwarded = 0;
     let scanned = 0;
+    let dilewati = 0;
 
     for (const chatId of chats) {
       try {
         const entity = await this._resolveEntity(chatId);
         const messages = await this.client.getMessages(entity, { limit });
         const ordered = (messages || []).slice().sort((a, b) => (a.id || 0) - (b.id || 0));
+
+        // 1. Kumpulkan calon: ada teksnya, masih dalam rentang umur,
+        //    memenuhi kriteria keyword, dan belum pernah diteruskan.
+        const calon = [];
         for (const m of ordered) {
           const text = (m && (m.message || m.text)) || '';
           if (!text) continue;
           scanned += 1;
           const ts = m.date ? Number(m.date) * 1000 : 0;
           if (ts && ts < cutoff) continue;
-          const res = await this.pipeline.handle({ chatId, messageId: m.id, text, source: 'catchup' });
+          if (!this.pipeline.layakDiteruskan(chatId, m.id, text)) continue;
+          calon.push({ id: m.id, text });
+        }
+        if (calon.length === 0) continue;
+
+        // 2. Hanya pesan TERAKHIR yang dikirim. Sisanya ditandai terproses
+        //    supaya tidak muncul lagi di susulan berikutnya.
+        let akanDikirim = calon;
+        if (hanyaTerakhir && calon.length > 1) {
+          const lama = calon.slice(0, -1);
+          for (const c of lama) {
+            this.pipeline.lewati(chatId, c.id, 'susulan - bukan peringatan terakhir');
+            dilewati += 1;
+          }
+          akanDikirim = calon.slice(-1);
+          logger.info(
+            `Susulan chat ${chatId}: ${calon.length} peringatan tertinggal, ` +
+            `hanya yang terakhir (msg ${akanDikirim[0].id}) yang dikirim.`
+          );
+        }
+
+        for (const c of akanDikirim) {
+          const res = await this.pipeline.handle({ chatId, messageId: c.id, text: c.text, source: 'catchup' });
           if (res && res.action === 'forwarded') forwarded += 1;
         }
       } catch (err) {
@@ -303,11 +339,12 @@ class TelegramUserSource extends EventEmitter {
     }
 
     this.caughtUp += forwarded;
+    const ekor = dilewati > 0 ? ` ${dilewati} peringatan lama dilewati (hanya yang terakhir dikirim).` : '';
     if (forwarded > 0) {
-      logger.info(`Susulan: ${forwarded} pesan tertinggal ikut diteruskan (dari ${scanned} pesan diperiksa).`);
+      logger.info(`Susulan: ${forwarded} pesan tertinggal ikut diteruskan (dari ${scanned} pesan diperiksa).${ekor}`);
       this.emit('caught-up', forwarded);
     } else {
-      logger.info(`Susulan: tidak ada pesan tertinggal (${scanned} pesan diperiksa).`);
+      logger.info(`Susulan: tidak ada pesan tertinggal (${scanned} pesan diperiksa).${ekor}`);
     }
     return forwarded;
   }

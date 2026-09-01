@@ -28,7 +28,7 @@ class Pipeline {
       ? followUpMaxWaitMs
       : (config.followUp ? config.followUp.maxWaitMs : 120000);
 
-    this.stats = { seen: 0, matched: 0, ignored: 0, duplicated: 0, forwarded: 0, failed: 0, followUps: 0, grouped: 0 };
+    this.stats = { seen: 0, matched: 0, ignored: 0, duplicated: 0, forwarded: 0, failed: 0, followUps: 0, grouped: 0, skipped: 0 };
     this._inFlight = new Set();
     this._pending = null;       // {group, count, firstAt}
     this._followUpTimer = null;
@@ -37,6 +37,37 @@ class Pipeline {
   /** Seluruh WhatsApp Group tujuan yang sedang aktif. */
   targetGroups() {
     return this.db.listActiveWaGroups().map((g) => ({ id: g.group_id, name: g.name || g.group_id }));
+  }
+
+  /**
+   * Apakah pesan ini MEMENUHI KRITERIA dan belum pernah diteruskan?
+   * Dipakai oleh susulan (catch-up) untuk memilih pesan terakhir saja,
+   * tanpa mengirim apa pun. Kriterianya persis sama dengan handle():
+   * chat diizinkan, keyword cocok, dan belum tercatat di processed_messages.
+   * @returns {boolean}
+   */
+  layakDiteruskan(chatId, messageId, text) {
+    const c = String(chatId);
+    const m = String(messageId);
+    if (!this.config.isAllowedChat(c)) return false;
+    if (!shouldForward(text || '')) return false;
+    if (this._inFlight.has(`${c}:${m}`) || this.db.isProcessed(c, m)) return false;
+    return true;
+  }
+
+  /**
+   * Tandai pesan sebagai terproses TANPA mengirim apa pun ke WhatsApp.
+   * Dipakai untuk peringatan lama yang sudah kedaluwarsa setelah restart:
+   * hanya yang terakhir yang dikirim, sisanya dilewati supaya tidak
+   * membanjiri group dengan data basi.
+   */
+  lewati(chatId, messageId, alasan = 'bukan pesan terakhir') {
+    const c = String(chatId);
+    const m = String(messageId);
+    this.db.markProcessed(c, m);
+    this.stats.skipped += 1;
+    logger.info(`Dilewati (${alasan}): chat ${c} msg ${m} - tidak dikirim ke WhatsApp.`);
+    return { action: 'skipped', reason: alasan };
   }
 
   /**

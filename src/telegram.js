@@ -175,6 +175,23 @@ class TelegramService {
           isAdmin ? '/ocs     - kirim laporan Fulfilment Dashboard sekarang' : '',
           isAdmin ? '/ocsstatus - status penjadwal laporan OCS' : '',
           isAdmin ? '/ocson, /ocsoff - nyalakan / matikan laporan berkala' : '',
+          isAdmin ? '/stok    - kirim laporan Stok Menipis sekarang' : '',
+          isAdmin ? '/stokstatus - pengaturan & status laporan stok' : '',
+          isAdmin ? '/stokon, /stokoff - nyalakan / matikan laporan stok' : '',
+          isAdmin ? '/stokjam 8,12,16 - jam kirim laporan stok' : '',
+          isAdmin ? '/stokambang 1000 - batas stok yang dianggap menipis' : '',
+          isAdmin ? '/stoktop 20 - jumlah SKU yang ditampilkan' : '',
+          isAdmin ? '/stokhari 90 - jendela hari untuk rata-rata penjualan' : '',
+          isAdmin ? '/stokmode winsor - cara menghitung rata-rata' : '',
+          isAdmin ? '/stokgroup - group WhatsApp tujuan laporan stok' : '',
+          isAdmin ? '/lock    - periksa & kirim peringatan LOCK STOCK sekarang' : '',
+          isAdmin ? '/lockstatus - pengaturan, PIC, dan jadwal berikutnya' : '',
+          isAdmin ? '/lockon, /lockoff - nyalakan / matikan pemeriksaan berkala' : '',
+          isAdmin ? '/lockpic <Shop> <Nama> - nama PIC tiap shop' : '',
+          isAdmin ? '/lockwa <Shop> <Nomor> - nomor PIC agar di-mention sungguhan' : '',
+          isAdmin ? '/lockjeda 60 7 - jeda menit + penyimpangan acak' : '',
+          isAdmin ? '/lockgroup - group WhatsApp tujuan peringatan lock' : '',
+          isAdmin ? '/lockulang on|off - ulangi pesan yang sama tiap jam?' : '',
           '',
           isAdmin ? '' : 'Anda bukan administrator bot ini.',
         ].filter(Boolean).join('\n'));
@@ -292,6 +309,179 @@ class TelegramService {
         await this.bot.sendMessage(chatId, nyalakan
           ? 'Laporan OCS DIAKTIFKAN. Pesan berikutnya dikirim sesuai jadwal.'
           : 'Laporan OCS DIMATIKAN. Pakai /ocs untuk mengirim sekali secara manual.');
+        return true;
+      }
+
+      /* ----------------------- laporan Stok Menipis ---------------------- */
+
+      case '/stok':
+      case '/stokstatus':
+      case '/stokon':
+      case '/stokoff':
+      case '/stokjam':
+      case '/stokambang':
+      case '/stoktop':
+      case '/stokhari':
+      case '/stokmode':
+      case '/stokgroup': {
+        if (!this.config.isAdmin(userId)) {
+          await this.bot.sendMessage(chatId, require('./admin').DENIED);
+          return true;
+        }
+        if (!this.stock) {
+          await this.bot.sendMessage(chatId,
+            'Laporan stok tidak aktif. Isi STOCK_ENABLED=true di file .env lalu jalankan ulang aplikasi.');
+          return true;
+        }
+        // Semua kata setelah nama perintah adalah nilainya.
+        const nilai = text.slice(cmd.length).replace(/^@\S+/, '').trim();
+
+        if (cmd === '/stok') {
+          await this.bot.sendMessage(chatId, 'Mengambil data stok & penjualan dari OCS. Ini bisa satu menit...');
+          const hasil = await this.stock.runOnce({ paksa: true });
+          if (hasil.status === 'sent') {
+            await this.bot.sendMessage(chatId, `Laporan stok terkirim ke ${hasil.groups} group WhatsApp.\n\n${hasil.text}`);
+          } else if (hasil.text) {
+            await this.bot.sendMessage(chatId, `Tidak dikirim (${hasil.reason}). Isi laporan saat ini:\n\n${hasil.text}`);
+          } else {
+            await this.bot.sendMessage(chatId, `Laporan stok tidak dikirim - ${hasil.reason || hasil.status}`);
+          }
+          return true;
+        }
+
+        if (cmd === '/stokstatus') {
+          await this.bot.sendMessage(chatId, this.stock.ringkasanStatus());
+          return true;
+        }
+
+        if (cmd === '/stokon' || cmd === '/stokoff') {
+          const nyalakan = cmd === '/stokon';
+          this.stock.setEnabled(nyalakan);
+          await this.bot.sendMessage(chatId, nyalakan
+            ? 'Laporan stok DIAKTIFKAN. Terkirim otomatis pada jam yang disetel (/stokjam).'
+            : 'Laporan stok DIMATIKAN. Pakai /stok untuk mengirim sekali secara manual.');
+          return true;
+        }
+
+        const peta = {
+          '/stokjam': ['hours', 'Contoh: /stokjam 8,12,16'],
+          '/stokambang': ['ambang', 'Contoh: /stokambang 1000'],
+          '/stoktop': ['top', 'Contoh: /stoktop 20'],
+          '/stokhari': ['salesDays', 'Contoh: /stokhari 90'],
+          '/stokmode': ['avgMode', 'Pilihan: winsor (bawaan), full, normal, median'],
+          '/stokgroup': ['groups', 'Contoh: /stokgroup 12036...@g.us  |  kosongkan untuk semua group aktif'],
+        };
+        const [nama, contoh] = peta[cmd];
+        if (!nilai && cmd !== '/stokgroup') {
+          await this.bot.sendMessage(chatId, `Nilainya belum diisi.\n${contoh}`);
+          return true;
+        }
+        try {
+          const pesan = this.stock.setOpsi(nama, nilai);
+          await this.bot.sendMessage(chatId, `Tersimpan. ${pesan}`);
+        } catch (err) {
+          await this.bot.sendMessage(chatId, `Gagal: ${err.message}\n${contoh}`);
+        }
+        return true;
+      }
+
+      /* ---------------------- peringatan LOCK STOCK ---------------------- */
+
+      case '/lock':
+      case '/lockstatus':
+      case '/lockon':
+      case '/lockoff':
+      case '/lockpic':
+      case '/lockwa':
+      case '/lockjeda':
+      case '/lockgroup':
+      case '/lockulang': {
+        if (!this.config.isAdmin(userId)) {
+          await this.bot.sendMessage(chatId, require('./admin').DENIED);
+          return true;
+        }
+        if (!this.lock) {
+          await this.bot.sendMessage(chatId,
+            'Peringatan lock stock tidak aktif. Isi LOCK_ENABLED=true di file .env lalu jalankan ulang aplikasi.');
+          return true;
+        }
+        const arg = text.slice(cmd.length).replace(/^@\S+/, '').trim();
+
+        if (cmd === '/lock') {
+          await this.bot.sendMessage(chatId, 'Memeriksa lock stock di OCS...');
+          const hasil = await this.lock.runOnce({ paksa: true });
+          if (hasil.status === 'sent') {
+            const isi = hasil.pesan.map((p) => p.text).join('\n\n- - - - -\n\n');
+            await this.bot.sendMessage(chatId,
+              `Terkirim ${hasil.alerts} pesan ke ${hasil.groups} group (${hasil.ringkasan}).\n\n${isi}`);
+          } else if (hasil.status === 'clear') {
+            await this.bot.sendMessage(chatId, 'Aman - tidak ada SKU dengan reserve melebihi stok tersedia.');
+          } else {
+            await this.bot.sendMessage(chatId, `Tidak dikirim - ${hasil.reason || hasil.status}`);
+          }
+          return true;
+        }
+
+        if (cmd === '/lockstatus') {
+          await this.bot.sendMessage(chatId, this.lock.ringkasanStatus());
+          return true;
+        }
+
+        if (cmd === '/lockon' || cmd === '/lockoff') {
+          const nyalakan = cmd === '/lockon';
+          this.lock.setEnabled(nyalakan);
+          await this.bot.sendMessage(chatId, nyalakan
+            ? 'Peringatan lock stock DIAKTIFKAN. Pemeriksaan berjalan sesuai jeda yang disetel.'
+            : 'Peringatan lock stock DIMATIKAN. Pakai /lock untuk memeriksa sekali secara manual.');
+          return true;
+        }
+
+        try {
+          if (cmd === '/lockpic' || cmd === '/lockwa') {
+            const pisah = arg.split(/\s+/);
+            const shop = pisah.shift();
+            const sisa = pisah.join(' ').trim();
+            if (!shop) {
+              await this.bot.sendMessage(chatId, cmd === '/lockpic'
+                ? 'Contoh: /lockpic NCO Ibu Manda'
+                : 'Contoh: /lockwa NCO 6281234567890  (tulis "hapus" untuk membuang nomornya)');
+              return true;
+            }
+            const pesan = cmd === '/lockpic'
+              ? this.lock.setPicNama(shop, sisa)
+              : this.lock.setPicNomor(shop, sisa);
+            await this.bot.sendMessage(chatId, `Tersimpan. ${pesan}`);
+            return true;
+          }
+
+          if (cmd === '/lockjeda') {
+            const [a, b] = arg.split(/\s+/);
+            if (!a) {
+              await this.bot.sendMessage(chatId, 'Contoh: /lockjeda 60 7  (tiap 60 menit, digeser acak +/- 7 menit)');
+              return true;
+            }
+            const p1 = this.lock.setOpsi('interval', a);
+            const p2 = b !== undefined ? this.lock.setOpsi('jitter', b) : null;
+            await this.bot.sendMessage(chatId, `Tersimpan. ${p1}${p2 ? `\n${p2}` : ''}`
+              + '\n\nBerlaku pada pemeriksaan berikutnya.');
+            return true;
+          }
+
+          if (cmd === '/lockgroup') {
+            await this.bot.sendMessage(chatId, `Tersimpan. ${this.lock.setOpsi('groups', arg)}`);
+            return true;
+          }
+
+          if (cmd === '/lockulang') {
+            // "/lockulang on" = ulangi tiap jam; "off" = hanya bila berubah.
+            const on = /^(on|ya|1|true)$/i.test(arg);
+            await this.bot.sendMessage(chatId, `Tersimpan. ${this.lock.setOpsi('onlyOnChange', on ? '0' : '1')}`);
+            return true;
+          }
+        } catch (err) {
+          await this.bot.sendMessage(chatId, `Gagal: ${err.message}`);
+          return true;
+        }
         return true;
       }
 

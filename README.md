@@ -211,6 +211,7 @@ NODE_ENV=production
 | `HEALTH_CHECK_MS` | tidak | Jeda pemeriksaan koneksi, bawaan `60000` |
 | `CATCHUP_LIMIT` | tidak | Jumlah pesan terakhir yang diperiksa saat pulih, bawaan `25` |
 | `CATCHUP_MAX_AGE_MINUTES` | tidak | Umur maksimal pesan susulan, bawaan `180` |
+| `CATCHUP_ONLY_LATEST` | tidak | `true` (bawaan) = setelah restart hanya peringatan **terakhir** yang dikirim |
 | `FOLLOWUP_WINDOW_MS` | tidak | Jendela penggabungan pesan mention, bawaan `15000` |
 | `FOLLOWUP_MAX_WAIT_MS` | tidak | Batas atas penantian follow-up, bawaan `120000` |
 | `DB_PATH` | tidak | Default `data/bot.db` |
@@ -798,6 +799,34 @@ Atur lewat `.env` bila perlu:
 HEALTH_CHECK_MS=60000
 CATCHUP_LIMIT=25
 CATCHUP_MAX_AGE_MINUTES=180
+CATCHUP_ONLY_LATEST=true
+```
+
+#### Setelah mati listrik: hanya peringatan terakhir yang dikirim
+
+Bila aplikasi mati beberapa jam lalu hidup kembali, di grup Telegram bisa
+menumpuk banyak peringatan yang belum sempat diteruskan. Mengirim semuanya
+sekaligus hanya membanjiri WhatsApp Group dengan angka stok yang sudah basi.
+
+Dengan `CATCHUP_ONLY_LATEST=true` (bawaan), susulan bekerja begini:
+
+1. Ambil pesan terakhir tiap chat (sebanyak `CATCHUP_LIMIT`).
+2. Saring dengan **kriteria yang sama persis** seperti jalur biasa: chat ada
+   di `TELEGRAM_ALLOWED_CHAT_IDS`, keyword cocok, umur pesan masih di dalam
+   `CATCHUP_MAX_AGE_MINUTES`, dan belum pernah diteruskan.
+3. Dari sisa itu, **hanya yang paling baru** yang dikirim ke WhatsApp.
+4. Peringatan lama yang ikut tersaring ditandai sudah diproses, sehingga
+   tidak muncul lagi pada susulan berikutnya.
+
+Pesan yang **tidak** memenuhi kriteria (tanpa keyword, chat lain) tidak
+disentuh sama sekali. Isi `CATCHUP_ONLY_LATEST=false` bila ingin kembali
+menerima seluruh peringatan tertinggal satu per satu.
+
+Di log terlihat sebagai:
+
+```
+Susulan chat -1001234567890: 4 peringatan tertinggal, hanya yang terakhir (msg 9704) yang dikirim.
+Dilewati (susulan - bukan peringatan terakhir): chat -1001234567890 msg 9701 - tidak dikirim ke WhatsApp.
 ```
 
 ### Memahami `Error: TIMEOUT ... _updateLoop`
@@ -1394,20 +1423,40 @@ hari yang benar.
 | `OCS_BASE_URL` | `https://ocs.iegsystem.id` | Alamat OCS |
 | `OCS_USERNAME` / `OCS_PASSWORD` | - | Kredensial login |
 | `OCS_DATABASE` | `EJI_WMS` | Isian **Database** di halaman login |
+| `OCS_GROUP_IDS` | kosong | Kosong = semua group aktif. Diisi = group khusus laporan (JID atau nama, dipisah koma) |
 | `OCS_INTERVAL_MINUTES` | `60` | Jeda antar laporan |
 | `OCS_ALIGN_TO_HOUR` | `true` | Laporan jatuh di menit `:00` |
 | `OCS_ACTIVE_HOURS` | `7-21` | Jam kerja saja. Kosongkan = 24 jam |
 | `OCS_TZ_OFFSET_MINUTES` | `420` | 420 = WIB, 480 = WITA, 540 = WIT |
 | `OCS_DATE_TYPE` | `dueDate` | `dueDate` = Batas Kirim, `createdDate` = Tanggal Pesanan |
 | `OCS_SHOP` / `OCS_CHANNEL` / `OCS_AREA` / `OCS_SHIFT` / `OCS_ROLE` | `All` / `all` | Filter, sama persis dengan halaman web |
-| `OCS_TOP_OPERATORS` | `3` | Jumlah operator teratas di pesan. `0` = jangan tampilkan |
+| `OCS_TOP_OPERATORS` | `10` | Jumlah operator teratas di pesan. `0` = jangan tampilkan |
+| `OCS_LEADERBOARD_PERIOD` | `month` | `month` = rata-rata per hari bulan berjalan, `today` = hanya hari ini |
+| `OCS_LEADERBOARD_ROLES` | `packer,picker` | Peran yang masuk peringkat. Kosongkan = semua peran |
+| `OCS_LEADERBOARD_EXCLUDE` | `mesin` | Buang operator yang namanya memuat kata ini |
 | `OCS_TITLE` | `FULFILMENT DASHBOARD` | Judul pesan |
 | `OCS_ONLY_WHEN_PROBLEM` | `false` | `true` = kirim hanya bila ada masalah |
 | `OCS_ALERT_BREACHED_SLA` | `1` | Ambang SLA terlewat untuk mode di atas |
 | `OCS_ALERT_AT_RISK` | `1` | Ambang order mendekati SLA |
 | `OCS_ALERT_INSTAN` | `1` | Ambang instan belum dikirim |
 
-### 21.4 Uji dulu sebelum dijadwalkan
+### 21.4 Group khusus laporan (opsional)
+
+Bila laporan per jam sebaiknya tidak bercampur dengan peringatan stok, kirimkan
+ke group tersendiri:
+
+1. Buat group WhatsApp baru, masukkan nomor bot sebagai anggota.
+2. Di Telegram: `/groups` ▸ **✍️ Tambah Manual** ▸ tempel link undangan group.
+   Bot akan menampilkan **JID**-nya (`1203...@g.us`).
+3. Matikan tombolnya menjadi ⚪ supaya group itu **tidak** menerima peringatan
+   stok dari Telegram.
+4. Isi JID tadi ke `OCS_GROUP_IDS` di `.env`, lalu jalankan ulang aplikasi.
+
+Group yang disebut di `OCS_GROUP_IDS` **tidak harus aktif** - bahkan boleh belum
+pernah didaftarkan sama sekali, asalkan yang ditulis berupa JID dan nomor bot
+sudah menjadi anggota group tersebut.
+
+### 21.5 Uji dulu sebelum dijadwalkan
 
 ```cmd
 npm run ocs:test
@@ -1423,7 +1472,7 @@ npm run ocs:test -- --raw
 
 Jalankan ini setiap kali mengubah filter di `.env`.
 
-### 21.5 Perintah Telegram
+### 21.6 Perintah Telegram
 
 | Perintah | Fungsi |
 |---|---|
@@ -1435,7 +1484,7 @@ Jalankan ini setiap kali mengubah filter di `.env`.
 `/ocson` dan `/ocsoff` menulis ke tabel `settings` (kunci `ocs_enabled`),
 sehingga nilainya menang atas `OCS_ENABLED` di `.env`.
 
-### 21.6 Isi pesan
+### 21.7 Isi pesan
 
 ```
 *FULFILMENT DASHBOARD - HARI INI*
@@ -1454,7 +1503,31 @@ Filter: Batas Kirim | Channel All | Shop All | Area All
 *RATA-RATA PER TAHAP*
 ```
 
-### 21.7 Kalau gagal
+### 21.9 Peringkat operator
+
+Bagian peringkat memakai rentang waktunya sendiri, terpisah dari sisa laporan:
+
+- Sisa laporan (SLA, WIP, aging, cycle) = **hari ini**
+- Peringkat operator = **bulan berjalan**, tanggal 1 pukul 00:00 waktu lokal
+  sampai akhir hari ini
+
+Angka yang diurutkan adalah **rata-rata per hari operasi**, bukan total. Pembagi
+`hari operasi` hanya menghitung hari yang benar-benar ada hasilnya di
+`/FulfilmentDashboard/Throughput`, sehingga hari libur atau gudang tutup tidak
+menurunkan rata-rata secara tidak adil.
+
+```
+*TOP 10 PACKER & PICKER - RATA-RATA/HARI*
+_1-26 Agu 2026, 23 hari operasi_
+1. BUDI (packer): 200/hari - total 4.600
+```
+
+Penyaringan dilakukan di sisi aplikasi, bukan lewat parameter `role` milik OCS,
+supaya beberapa peran bisa digabung sekaligus. Nama peran harus sama persis
+dengan yang dipakai OCS - jalankan `npm run ocs:test` dan lihat baris
+**"Peran yang ADA"** untuk memastikannya.
+
+### 21.8 Kalau gagal
 
 | Gejala | Sebab yang paling sering |
 |---|---|
@@ -1466,3 +1539,334 @@ Filter: Batas Kirim | Channel All | Shop All | Area All
 
 Kegagalan laporan dikirim sebagai notifikasi ke admin Telegram, dan detailnya
 selalu ada di log aplikasi.
+
+---
+
+## 22. Laporan Stok Menipis
+
+Menarik dua halaman OCS lalu menggabungkannya menjadi satu daftar
+"SKU apa yang sebentar lagi habis":
+
+| Sumber | Halaman OCS | Dipakai untuk |
+|---|---|---|
+| `GET /odata/DTO_WmsItemStockLiteV2` | Stocks > View V2 | SKU, Available Qty, Category, Status |
+| `GET /Report/OrderPerSkuReport` | Report > Order > Sku | penjualan harian per SKU |
+
+Keduanya **hanya dibaca**. Tidak ada satu pun permintaan yang mengubah
+data di OCS, dan ada uji otomatis yang menjaganya tetap begitu.
+
+### 22.1 Penyaringan
+
+Dikerjakan di sisi OCS lewat OData, jadi yang melintasi jaringan hanya
+baris yang memang dibutuhkan:
+
+```
+IsActive eq true and Category eq 'Sku' and AvailableQty lt 1000
+```
+
+- **Status aktif saja** - `STOCK_ACTIVE_ONLY`
+- **Kategori Sku saja** - `STOCK_CATEGORY`
+- **Di bawah 1.000** - `STOCK_THRESHOLD`, atau `/stokambang 1000`
+
+### 22.2 Avg Daily Sales - kenapa payday TIDAK dibuang
+
+Angka ini menjawab satu pertanyaan: *stok segini cukup untuk berapa hari?*
+
+Karena itu semua hari ikut dihitung, termasuk payday (tanggal 25-31) dan
+double date (1.1 sampai 12.12). Membuang hari-hari itu berarti membuang
+hampir seperempat bulan yang justru paling ramai: rata-ratanya jadi
+terlalu rendah dan peringatan datang **terlambat**, padahal stok tetap
+habis di tanggal 27.
+
+Yang dijinakkan bukan harinya, melainkan **lonjakannya** (winsorize):
+
+1. Susun penjualan harian sepanjang jendela; hari tanpa penjualan = 0.
+2. Hitung persentil ke-95 dari **hari yang ada penjualannya saja**.
+   Nol tidak ikut - kalau ikut, SKU yang lakunya jarang tapi banyak akan
+   dapat batas mendekati nol dan rata-ratanya ambruk.
+3. Hari yang melebihi batas itu **dihitung sebesar batas**, bukan dibuang.
+4. Rata-rata = total (setelah dibatasi) / jumlah hari dalam jendela.
+
+| Cara | Kelemahannya |
+|---|---|
+| Kecualikan payday & double date | Puncak dibuang, lembah disisakan - rata-rata terlalu rendah, alert telat |
+| Tanpa filter sama sekali | Satu 12.12 bisa mengangkat rata-rata SKU lambat 2-3x |
+| **Winsorize P95** (bawaan) | Lonjakan ditekan, hari tetap utuh - tidak bias ke atas maupun ke bawah |
+
+Bonus: cara ini tidak butuh daftar tanggal sama sekali, sehingga flash
+sale dadakan, live TikTok, dan campaign ikut tertangani - bukan hanya
+tanggal yang kebetulan kita ingat.
+
+Mode lain tetap tersedia untuk pembanding lewat `/stokmode`:
+`full` (tanpa batas), `normal` (buang payday & double date), `median`.
+
+Angka `normal` dan `puncak` selalu ikut ditampilkan di pesan supaya
+perilaku tiap SKU tetap kelihatan.
+
+**Jendela hari.** Bawaan 90 hari **penuh** terakhir, berakhir kemarin.
+Hari ini sengaja tidak ikut karena masih berjalan - memasukkannya akan
+menarik rata-rata ke bawah setiap pagi.
+
+**Pemecahan permintaan.** OCS menjawab `504 Gateway Timeout` bila diminta
+90 hari sekaligus, sedangkan 30 hari aman (sekitar 2 MB per potong).
+Permintaan karena itu dipecah sebesar `STOCK_CHUNK_DAYS`, lalu hasilnya
+di-cache per jendela tanggal - tiga laporan dalam satu hari hanya menarik
+data berat itu **sekali**.
+
+### 22.3 Jam kirim
+
+Berbeda dengan laporan Fulfilment yang berjalan tiap sekian menit,
+laporan ini terkirim pada **jam tertentu**: `/stokjam 8,12,16`.
+
+Penjadwal berdetak tiap menit lalu memeriksa apakah jam sekarang termasuk
+jam kirim dan belum pernah terkirim pada jam itu hari ini. Ada toleransi
+10 menit, jadi aplikasi yang baru hidup pukul 08:03 tetap mengirim
+laporan pukul 8. Penanda "sudah terkirim" disimpan di database, sehingga
+restart pukul 08:20 **tidak** menghasilkan laporan kedua.
+
+### 22.4 Perintah Telegram
+
+Semua tersimpan di database dan menang atas `.env`, jadi tidak perlu
+mengedit berkas maupun me-restart service.
+
+| Perintah | Fungsi |
+|---|---|
+| `/stok` | Ambil data dan kirim laporan **sekarang** (menembus tombol mati) |
+| `/stokstatus` | Seluruh pengaturan + waktu keberhasilan terakhir |
+| `/stokon`, `/stokoff` | Nyalakan / matikan pengiriman terjadwal |
+| `/stokjam 8,12,16` | Jam kirim, waktu lokal |
+| `/stokambang 1000` | Batas stok yang dianggap menipis |
+| `/stoktop 20` | Jumlah SKU yang ditampilkan |
+| `/stokhari 90` | Jendela hari untuk rata-rata penjualan |
+| `/stokmode winsor` | `winsor`, `full`, `normal`, atau `median` |
+| `/stokgroup <JID atau nama>` | Group tujuan. Kosongkan = semua group aktif |
+
+`/stokgroup` menerima JID (`1203...@g.us`) maupun nama group yang sudah
+terdaftar di `/groups`, dipisah koma. Group tujuan **tidak harus aktif**,
+sehingga sebuah group khusus laporan stok bisa menerima laporan ini tanpa
+ikut menerima peringatan stok dari Telegram: daftarkan lewat Admin Menu
+lalu matikan tombolnya (⚪).
+
+### 22.5 Uji dulu sebelum dijadwalkan
+
+```cmd
+npm run stock:test
+```
+
+Login, tarik data, dan **cetak pesannya ke layar**. Tidak ada satu pun
+pesan WhatsApp yang terkirim.
+
+```cmd
+npm run stock:test -- --banding
+npm run stock:test -- --sku HANASUI-TONE-UP-SERUM-SUNSCREEN
+```
+
+`--banding` menjajarkan keempat mode rata-rata untuk 15 SKU teratas.
+Bacanya: `full` jauh di atas `winsor` berarti SKU itu punya lonjakan
+ekstrem; `normal` jauh di bawah `winsor` berarti penjualannya memang
+bertumpu di payday.
+
+`--sku` membedah satu SKU hari per hari, menandai hari puncak dengan `*`,
+lalu menghitung keempat mode beserta batas P95-nya.
+
+### 22.6 Isi pesan
+
+```
+*STOK MENIPIS*
+Jumat, 28 Agu 2026 - 08:00 WIB
+Stok < 1.000 | Kategori Sku | Status aktif
+Rata-rata 90 hari (semua hari, lonjakan dibatasi P95)
+
+*215 SKU di bawah ambang* - 20 paling mendesak:
+
+1. HANASUI-TONE-UP-SERUM
+   Stok *840* | Avg *62*/hari -> 13 hari
+   normal 48 - puncak 210
+2. ...
+
+_...dan 195 SKU lain di bawah ambang._
+```
+
+Urutannya **paling mendesak dulu** - sisa hari paling sedikit di atas.
+SKU yang stoknya rendah tetapi tidak ada penjualannya sama sekali ditaruh
+paling belakang; stoknya memang rendah, tetapi tidak ada yang membelinya.
+Pesan dipotong otomatis agar tidak pernah melewati batas WhatsApp.
+
+### 22.7 Kalau gagal
+
+| Gejala | Sebab yang paling sering |
+|---|---|
+| `504` / `Waktu tunggu habis` saat menarik penjualan | Rentang sekali tarik terlalu besar - turunkan `STOCK_CHUNK_DAYS` ke 15 |
+| `tujuan tidak dikenal: ...` | Nama group di `/stokgroup` salah tulis. Cek `/groups` |
+| `belum ada WhatsApp Group aktif` | `/stokgroup` kosong dan tidak ada group aktif |
+| Laporan tidak pernah datang | `/stokstatus` - cek "Jam kirim" sudah disetel dan statusnya AKTIF |
+| Semua Avg 0 | Jendela hari jatuh di periode tanpa data. Cek `npm run stock:test` bagian 3 |
+
+---
+
+## 23. Peringatan Lock Stock
+
+Memeriksa SKU yang **stok ter-reserve-nya melebihi stok tersedia**
+(`ReserveQty > AvailableQty`) - keadaan yang berujung oversell bila tidak
+segera dilepas. Berjalan sebagai penjadwal sendiri, terpisah dari jalur
+forward Telegram maupun dari laporan OCS dan laporan stok.
+
+| Sumber | Halaman OCS | Dipakai untuk |
+|---|---|---|
+| `GET /odata/DTO_WmsItemStockLiteV2` | Stocks > View V2 | SKU, Available Qty, Reserve Qty |
+| `GET /MasterData/GetSkuRack` | Master > Sku Rack | pemetaan Seller SKU -> Shop |
+
+Keduanya hanya dibaca; ada uji otomatis yang menjaganya tetap begitu.
+
+### 23.1 Kenapa "service sendiri" tetap satu proses
+
+WhatsApp hanya mengizinkan **satu sesi per nomor**. Windows Service kedua
+yang berdiri sendiri berarti nomor WhatsApp kedua beserta HP-nya dan scan
+QR sendiri. Karena itu modul ini berdiri sendiri di dalam aplikasi yang
+sama: penjadwal, pengaturan, dan perintah Telegram terpisah, tetapi sesi
+WhatsApp dan **antrean pengiriman** dipakai bersama - dan antrean bersama
+itulah yang menjamin tidak pernah ada dua pengiriman berbarengan.
+
+### 23.2 Jeda acak
+
+Permintaan yang jatuh di detik yang sama persis tiap jam adalah pola mesin
+yang paling mudah dikenali. Setiap putaran karena itu menjadwalkan putaran
+berikutnya sendiri pada:
+
+```
+jeda dasar  +/- acak(0..LOCK_JITTER_MINUTES menit)  + acak(0..59 detik)
+```
+
+Angka acaknya dari `crypto.randomInt`, bukan `Math.random`, supaya tidak
+membentuk deret yang bisa ditebak. Dengan bawaan 60 menit +/- 7 menit,
+jarak antar pemeriksaan berkisar 53-68 menit dan tidak pernah berulang.
+Jeda tidak pernah lebih pendek dari satu menit, berapa pun jitternya.
+
+Lihat contohnya:
+
+```cmd
+npm run lock:test -- --jeda
+```
+
+### 23.3 Pencarian Shop - tiga lapis
+
+Data stok tidak memuat Shop, jadi Shop dicari dari Master Sku Rack:
+
+1. **Master Sku Rack** (`SellerSku` -> `ShopCode`). Satu SKU **boleh**
+   terdaftar di lebih dari satu shop - barang yang sama dijual dua toko,
+   bin dan SAP code-nya identik. SKU seperti itu masuk ke daftar **kedua**
+   shop, karena keduanya sama-sama bisa kena oversell, dan pesannya diberi
+   keterangan.
+2. **Tebakan dari kode SKU**. Bundle seperti `BDL-HANASUI-0000001580`
+   tidak ada di master, tetapi nama shopnya jelas tertulis. Hanya potongan
+   **utuh** antar tanda hubung yang diterima, jadi `NCOBALM` tidak dibaca
+   sebagai NCO.
+3. **Keranjang "TANPA SHOP"**. Kalau tetap tidak ketemu, SKU-nya tetap
+   dilaporkan dengan keterangan - tidak pernah ada SKU yang hilang
+   diam-diam hanya karena belum terdaftar di master.
+
+Master Sku Rack (sekitar 700 baris) disimpan sementara selama
+`LOCK_RACK_CACHE_MINUTES` supaya tidak ditarik ulang tiap jam.
+
+### 23.4 PIC per Shop
+
+Satu pesan per shop, disapa ke PIC-nya masing-masing:
+
+| Shop | PIC bawaan |
+|---|---|
+| NCO | Ibu Manda |
+| Hanasui | Ibu Sandra |
+| FYNE | Bpk. Reza |
+| EOMMA | Bpk. Maulana |
+
+```
+/lockpic NCO Ibu Manda
+/lockwa  NCO 6281234567890
+```
+
+`/lockwa` membuat PIC di-**mention sungguhan**, sehingga HP-nya berbunyi
+walau group di-mute. WhatsApp hanya mengenali mention bila teks memuat
+`@<nomor>`, jadi sapaannya menjadi `*Dear Ibu Manda @6281234567890*`;
+aplikasi WhatsApp penerima yang menampilkannya sebagai nama kontak.
+Tanpa nomor, PIC tetap disapa dengan namanya, hanya tanpa mention.
+
+Nomor ditulis dengan kode negara, tanpa `+` dan tanpa `0` di depan.
+Tulis `/lockwa NCO hapus` untuk membuang nomornya.
+
+### 23.5 Perintah Telegram
+
+| Perintah | Fungsi |
+|---|---|
+| `/lock` | Periksa dan kirim **sekarang** (menembus tombol mati) |
+| `/lockstatus` | Pengaturan, PIC, temuan terakhir, jadwal berikutnya |
+| `/lockon`, `/lockoff` | Nyalakan / matikan pemeriksaan berkala |
+| `/lockpic <Shop> <Nama>` | Nama PIC |
+| `/lockwa <Shop> <Nomor>` | Nomor PIC untuk mention |
+| `/lockjeda 60 7` | Jeda 60 menit, digeser acak +/- 7 menit |
+| `/lockgroup <JID atau nama>` | Group tujuan. Kosongkan = semua group aktif |
+| `/lockulang on\|off` | `off` = jangan ulangi pesan yang isinya sama persis |
+
+### 23.6 Pesan yang sama tiap jam
+
+Lock stock bisa bertahan berjam-jam. Bawaannya pesan tetap dikirim tiap
+putaran (`/lockulang on`), tetapi bila PIC mulai terganggu:
+
+```
+/lockulang off
+```
+
+Aplikasi lalu menyimpan sidik jari isi peringatan - **termasuk angkanya**,
+sehingga reserve yang bertambah tetap dianggap perubahan walau daftar
+SKU-nya sama - dan hanya mengirim ulang bila ada yang berubah. Begitu
+semua lock terlepas, sidik jarinya dikosongkan, jadi kemunculan berikutnya
+selalu dikirim.
+
+### 23.7 Uji dulu
+
+```cmd
+npm run lock:test
+npm run lock:test -- --rack
+npm run lock:test -- --jeda
+```
+
+Login, periksa, dan **cetak pesannya ke layar**. Tidak ada satu pun pesan
+WhatsApp yang terkirim. Bagian 4 menampilkan asal shop tiap SKU
+(`master` / `tebakan dari kode SKU` / `TIDAK KETEMU`) - itu tempat pertama
+yang dilihat kalau ada SKU yang masuk ke shop yang salah.
+
+`--rack` menampilkan daftar SKU yang terdaftar di lebih dari satu shop.
+
+### 23.8 Contoh pesan
+
+```
+*Dear Ibu Sandra @6281234567890*
+
+⚠️ PERINGATAN LOCK STOCK
+Ditemukan 4 SKU *_Shoop Hanasui_* dengan stok tersedia di bawah stok ter-reserve (Area: Pusat).
+🕒 2026-08-31 19:49:30 WIB
+SKU                       Resv  Avail
+BDL-NCO-00000000103       2550   2268
+BDL-NCO-00000000098        850    749
+POWER-MINIPORE-SERUM       456    432
+BOUNCYBLUSH-ROSEATE-2     1445   1444
+
+*Mohon segera lepas Lock Stock sebelum terjadi Oversell.*
+
+Terima kasih.
+
+_Sent by BOT-WRH_
+```
+
+Urutannya **selisih terbesar lebih dulu** - itu yang paling berisiko
+oversell. Tabelnya dibungkus blok monospace agar kolomnya benar-benar
+lurus; tanpa itu font proporsional WhatsApp membuat angkanya bergeser.
+
+### 23.9 Kalau gagal
+
+| Gejala | Sebab yang paling sering |
+|---|---|
+| SKU masuk ke shop yang salah | Belum terdaftar di Master Sku Rack sehingga ditebak dari kodenya. Cek `npm run lock:test` bagian 4 |
+| Banyak SKU jadi "TANPA SHOP" | Master Sku Rack belum lengkap - daftarkan SKU-nya di `/master/sku-rack` |
+| PIC tidak menerima notifikasi | Nomornya belum diisi (`/lockwa`), atau nomornya bukan anggota group tersebut |
+| Kolom tabel tidak lurus | `LOCK_MONOSPACE=false`. Kembalikan ke `true` |
+| Pesan datang terlalu sering | Turunkan dengan `/lockjeda`, atau matikan pengulangan dengan `/lockulang off` |

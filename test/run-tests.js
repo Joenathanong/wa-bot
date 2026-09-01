@@ -16,6 +16,10 @@ process.env.NODE_ENV = 'test';
 // sekaligus (bot dan akun).
 process.env.TELEGRAM_SOURCE = 'both';
 process.env.LOG_LEVEL = process.env.LOG_LEVEL || 'error';
+// Log uji TIDAK boleh menumpang data/app.log milik aplikasi sungguhan:
+// stub memancarkan kejadian palsu (LOGOUT WhatsApp, sesi kedaluwarsa, group
+// yang salah tulis) yang akan terbaca seolah-olah bot benar-benar bermasalah.
+process.env.LOG_FILE = require('path').join(require('os').tmpdir(), 'telegram-wa-bridge-test.log');
 process.env.TELEGRAM_BOT_TOKEN = '123456789:AAEEsTubTokenUntukPengujianSaja123';
 process.env.ADMIN_TELEGRAM_IDS = '111,222';
 process.env.TELEGRAM_ALLOWED_CHAT_IDS = '-100999';
@@ -1708,6 +1712,82 @@ async function run() {
     gram.__state().failEntity = false;
   });
 
+  /* ---- setelah mati listrik: hanya peringatan TERAKHIR yang dikirim ---- */
+
+  const diteruskan = () => waSent().filter((m) => String(m.text).includes('[FORWARDED FROM TELEGRAM]'));
+
+  await test('susulan hanya mengirim peringatan TERAKHIR yang belum terkirim', async () => {
+    gram.__state().history = [
+      { id: 9701, message: TELEGRAM_SAMPLE, date: nowSec() - 300 },
+      { id: 9702, message: 'Laporan harian selesai.', date: nowSec() - 240 },
+      { id: 9703, message: TELEGRAM_SAMPLE, date: nowSec() - 180 },
+      { id: 9704, message: TELEGRAM_SAMPLE, date: nowSec() - 60 },
+    ];
+    global.__WA_STUB__.sent = [];
+    const n = await src2.catchUp();
+    await settle();
+    assert.strictEqual(n, 1, 'hanya satu pesan yang boleh diteruskan');
+    const fw = diteruskan();
+    assert.strictEqual(fw.length, 1, 'hanya satu pesan forward ke WhatsApp');
+    assert.strictEqual(idb.isProcessed(SOURCE_CHAT, '9704'), true, 'yang terakhir harus terkirim');
+    assert.strictEqual(idb.isProcessed(SOURCE_CHAT, '9701'), true, 'yang lama ditandai terproses');
+    assert.strictEqual(idb.isProcessed(SOURCE_CHAT, '9703'), true, 'yang lama ditandai terproses');
+  });
+
+  await test('peringatan lama yang dilewati tidak muncul lagi di susulan berikutnya', async () => {
+    global.__WA_STUB__.sent = [];
+    const n = await src2.catchUp();
+    await settle();
+    assert.strictEqual(n, 0);
+    assert.strictEqual(waSent().length, 0);
+  });
+
+  await test('pesan tanpa keyword tidak ikut ditandai terproses saat susulan', () => {
+    assert.strictEqual(idb.isProcessed(SOURCE_CHAT, '9702'), false,
+      'pesan yang tidak memenuhi kriteria tidak boleh disentuh');
+  });
+
+  await test('satu peringatan tertinggal tetap dikirim seperti biasa', async () => {
+    gram.__state().history = [{ id: 9710, message: TELEGRAM_SAMPLE, date: nowSec() - 30 }];
+    global.__WA_STUB__.sent = [];
+    const n = await src2.catchUp();
+    await settle();
+    assert.strictEqual(n, 1);
+    assert.strictEqual(diteruskan().length, 1);
+    assert.strictEqual(idb.isProcessed(SOURCE_CHAT, '9710'), true);
+  });
+
+  await test('CATCHUP_ONLY_LATEST=false mengembalikan perilaku lama (kirim semua)', async () => {
+    gram.__state().history = [
+      { id: 9721, message: TELEGRAM_SAMPLE, date: nowSec() - 200 },
+      { id: 9722, message: TELEGRAM_SAMPLE, date: nowSec() - 100 },
+    ];
+    global.__WA_STUB__.sent = [];
+    const n = await src2.catchUp({ onlyLatest: false });
+    await settle();
+    assert.strictEqual(n, 2, 'kedua pesan harus diteruskan');
+    assert.strictEqual(diteruskan().length, 2);
+  });
+
+  await test('pipeline.lewati menandai terproses tanpa mengirim apa pun', async () => {
+    global.__WA_STUB__.sent = [];
+    const hasil = tg.pipeline.lewati(SOURCE_CHAT, 9799, 'uji');
+    await settle();
+    assert.strictEqual(hasil.action, 'skipped');
+    assert.strictEqual(waSent().length, 0);
+    assert.strictEqual(idb.isProcessed(SOURCE_CHAT, '9799'), true);
+  });
+
+  await test('layakDiteruskan memakai kriteria yang sama dengan handle', () => {
+    assert.strictEqual(tg.pipeline.layakDiteruskan(SOURCE_CHAT, 9801, TELEGRAM_SAMPLE), true);
+    assert.strictEqual(tg.pipeline.layakDiteruskan(SOURCE_CHAT, 9802, 'tanpa keyword'), false,
+      'keyword tidak cocok');
+    assert.strictEqual(tg.pipeline.layakDiteruskan('-100777', 9803, TELEGRAM_SAMPLE), false,
+      'chat di luar allowlist');
+    assert.strictEqual(tg.pipeline.layakDiteruskan(SOURCE_CHAT, 9799, TELEGRAM_SAMPLE), false,
+      'sudah pernah diproses');
+  });
+
   await test('koneksi mati terdeteksi lalu disambung ulang otomatis', async () => {
     gram.__state().history = [];
     const before = src2.reconnects;
@@ -1766,7 +1846,9 @@ async function run() {
   await test('status melaporkan jumlah sambung ulang & pesan susulan', () => {
     const st = src2.status();
     assert.ok(st.reconnects >= 2);
-    assert.strictEqual(st.caughtUp, 2, 'satu saat start + satu yang tadi tertunda');
+    // 1 saat start + 1 yang tadi tertunda + 1 "hanya yang terakhir"
+    // + 1 peringatan tunggal + 2 saat onlyLatest dimatikan
+    assert.strictEqual(st.caughtUp, 6, 'penghitung susulan bersifat kumulatif');
     assert.strictEqual(st.catchUpTertunda, false);
     assert.strictEqual(st.connected, true);
   });
@@ -1882,7 +1964,8 @@ async function run() {
   function dbPalsu(setting = {}) {
     const store = { ...setting };
     return {
-      listActiveWaGroups: () => [{ id: 1, group_id: '123@g.us', name: 'DAILY E-COMMERCE' }],
+      listActiveWaGroups: () => [{ id: 1, group_id: '123@g.us', name: 'DAILY E-COMMERCE', active: 1 }],
+      listWaGroups: () => [{ id: 1, group_id: '123@g.us', name: 'DAILY E-COMMERCE', active: 1 }],
       getSetting: (k, d = null) => (k in store ? store[k] : d),
       setSetting: (k, v) => { store[k] = String(v); },
       _store: store,
@@ -1913,6 +1996,102 @@ async function run() {
     assert.strictEqual(terkirim.length, 1, 'satu group aktif = satu pesan');
     assert.strictEqual(terkirim[0].gid, '123@g.us');
     assert.ok(terkirim[0].teks.includes('SLA terlewat'));
+  });
+
+  await test('OCS_GROUP_IDS membatasi laporan ke group tertentu saja', async () => {
+    const terkirim = [];
+    const waPalsu = { isReady: () => true, sendText: async (gid) => { terkirim.push(gid); } };
+    const isi = [
+      { id: 1, group_id: '111@g.us', name: 'DAILY E-COMMERCE', active: 1 },
+      { id: 2, group_id: '222@g.us', name: 'IEG x Marketing', active: 1 },
+    ];
+    const dbDua = {
+      listActiveWaGroups: () => isi.filter((g) => g.active),
+      listWaGroups: () => isi,
+      getSetting: (k, d = null) => d,
+      setSetting: () => {},
+    };
+    const sched = new OcsScheduler({
+      db: dbDua, whatsapp: waPalsu, queue: new Queue({ delayMs: 0 }),
+      config: configPalsu({ groupIds: ['111@g.us'] }),
+      client: { fetchFulfilment: async () => CONTOH },
+    });
+    const hasil = await sched.runOnce();
+    assert.strictEqual(hasil.status, 'sent');
+    assert.deepStrictEqual(terkirim, ['111@g.us'], 'hanya group yang dipilih');
+  });
+
+  await test('OCS_GROUP_IDS boleh diisi nama group, bukan hanya JID', async () => {
+    const terkirim = [];
+    const waPalsu = { isReady: () => true, sendText: async (gid) => { terkirim.push(gid); } };
+    const isi = [
+      { id: 1, group_id: '111@g.us', name: 'DAILY E-COMMERCE', active: 1 },
+      { id: 2, group_id: '222@g.us', name: 'IEG x Marketing', active: 1 },
+    ];
+    const dbDua = {
+      listActiveWaGroups: () => isi.filter((g) => g.active),
+      listWaGroups: () => isi,
+      getSetting: (k, d = null) => d,
+      setSetting: () => {},
+    };
+    const sched = new OcsScheduler({
+      db: dbDua, whatsapp: waPalsu, queue: new Queue({ delayMs: 0 }),
+      config: configPalsu({ groupIds: ['ieg x marketing'] }),
+      client: { fetchFulfilment: async () => CONTOH },
+    });
+    await sched.runOnce();
+    assert.deepStrictEqual(terkirim, ['222@g.us']);
+  });
+
+  await test('nama group yang salah tulis memberi pesan galat yang jelas', async () => {
+    // Nilai berbentuk JID selalu diterima apa adanya (group boleh belum
+    // terdaftar). Yang bisa salah tulis adalah NAMA group.
+    const waPalsu = { isReady: () => true, sendText: async () => { throw new Error('tidak boleh dipanggil'); } };
+    const sched = new OcsScheduler({
+      db: dbPalsu(), whatsapp: waPalsu, queue: new Queue({ delayMs: 0 }),
+      config: configPalsu({ groupIds: ['GROUP YANG TIDAK ADA'] }),
+      client: { fetchFulfilment: async () => CONTOH },
+    });
+    const hasil = await sched.runOnce();
+    assert.strictEqual(hasil.status, 'failed');
+    assert.ok(/tidak dikenal/.test(hasil.reason), hasil.reason);
+    assert.ok(/GROUP YANG TIDAK ADA/.test(hasil.reason), 'sebutkan nilai yang salah');
+  });
+
+  await test('group khusus laporan menerima OCS walau TIDAK aktif untuk forwarding', async () => {
+    const terkirim = [];
+    const waPalsu = { isReady: () => true, sendText: async (gid) => { terkirim.push(gid); } };
+    const isi = [
+      { id: 1, group_id: '111@g.us', name: 'DAILY E-COMMERCE', active: 1 },
+      { id: 2, group_id: '333@g.us', name: 'LAPORAN FULFILMENT', active: 0 },
+    ];
+    const dbCampur = {
+      listActiveWaGroups: () => isi.filter((g) => g.active),
+      listWaGroups: () => isi,
+      getSetting: (k, d = null) => d,
+      setSetting: () => {},
+    };
+    const sched = new OcsScheduler({
+      db: dbCampur, whatsapp: waPalsu, queue: new Queue({ delayMs: 0 }),
+      config: configPalsu({ groupIds: ['333@g.us'] }),
+      client: { fetchFulfilment: async () => CONTOH },
+    });
+    const hasil = await sched.runOnce();
+    assert.strictEqual(hasil.status, 'sent');
+    assert.deepStrictEqual(terkirim, ['333@g.us'], 'hanya group laporan, bukan group forwarding');
+  });
+
+  await test('JID yang belum terdaftar sama sekali tetap bisa dijadikan tujuan', async () => {
+    const terkirim = [];
+    const waPalsu = { isReady: () => true, sendText: async (gid) => { terkirim.push(gid); } };
+    const sched = new OcsScheduler({
+      db: dbPalsu(), whatsapp: waPalsu, queue: new Queue({ delayMs: 0 }),
+      config: configPalsu({ groupIds: ['999888777@g.us'] }),
+      client: { fetchFulfilment: async () => CONTOH },
+    });
+    const hasil = await sched.runOnce();
+    assert.strictEqual(hasil.status, 'sent');
+    assert.deepStrictEqual(terkirim, ['999888777@g.us']);
   });
 
   await test('penjadwal tidak mengirim saat WhatsApp belum siap', async () => {
@@ -1990,6 +2169,953 @@ async function run() {
       assert.ok(/\/Auth\/(Login|Refresh|Logout)/.test(p), `POST ke endpoint non-Auth: ${p}`);
     }
     assert.ok(!/'(PUT|DELETE|PATCH)'/.test(kode), 'tidak ada metode yang mengubah data');
+  });
+
+
+
+  /* ------------------- PERINGKAT OPERATOR (BULAN) ------------------ */
+
+  const CONTOH_BULAN = {
+    from: '2026-07-31T17:00:00.000Z',   // 1 Agu 00:00 WIB
+    to: '2026-08-26T17:00:00.000Z',     // 27 Agu 00:00 WIB
+    leaderboard: [
+      { Role: 'manifester', OperatorName: 'RICKY FEBRIANSYAH', CompletedCount: 90000 },
+      { Role: 'packer', OperatorName: 'mesin 01', CompletedCount: 80000 },
+      { Role: 'packer', OperatorName: 'MESIN 02', CompletedCount: 70000 },
+      { Role: 'packer', OperatorName: 'BUDI', CompletedCount: 4600 },
+      { Role: 'picker', OperatorName: 'SYSTEM', CompletedCount: 99999 },
+      { Role: 'picker', OperatorName: 'SITI', CompletedCount: 4140 },
+      { Role: 'packer', OperatorName: 'AGUS', CompletedCount: 2300 },
+      { Role: 'picker', OperatorName: 'NOL', CompletedCount: 0 },
+    ],
+    throughput: [
+      // 23 hari operasi: 1-23 Agustus
+      ...Array.from({ length: 23 }, (_, i) => ({
+        Day: `2026-08-${String(i + 1).padStart(2, '0')}`, Role: 'packer',
+        TotalCount: 100, CompletedCount: 100,
+      })),
+      // hari libur - ada barisnya tetapi nol, tidak boleh ikut jadi pembagi
+      { Day: '2026-08-24', Role: 'packer', TotalCount: 0, CompletedCount: 0 },
+      // peran lain di hari yang sama sekali berbeda - tidak boleh menambah hari
+      { Day: '2026-08-25', Role: 'manifester', TotalCount: 50, CompletedCount: 50 },
+    ],
+    errors: [],
+  };
+
+  await test('rentang bulan berjalan = tanggal 1 s/d akhir hari ini (waktu lokal)', () => {
+    const r = laporan.monthToDateRange(new Date('2026-08-26T04:20:00.000Z'), 420);
+    assert.strictEqual(r.from, '2026-07-31T17:00:00.000Z', '1 Agu 00:00 WIB');
+    assert.strictEqual(r.to, '2026-08-26T17:00:00.000Z', 'akhir hari ini');
+  });
+
+  await test('hari operasi hanya menghitung hari yang benar-benar ada hasilnya', () => {
+    const hari = laporan.hitungHariOperasi(CONTOH_BULAN.throughput, ['packer', 'picker']);
+    assert.strictEqual(hari, 23, 'hari nol dan peran lain tidak ikut dihitung');
+  });
+
+  await test('peringkat menyaring peran, membuang mesin, dan memakai rata-rata harian', () => {
+    const hasil = laporan.ringkasOperator(CONTOH_BULAN.leaderboard, {
+      roles: ['packer', 'picker'], kecuali: ['mesin', 'system'], top: 10, hariOperasi: 23,
+    });
+    const nama = hasil.map((o) => o.nama);
+    assert.ok(!nama.includes('RICKY FEBRIANSYAH'), 'manifester tidak ikut');
+    assert.ok(!nama.some((n) => /mesin/i.test(n)), 'mesin dibuang, termasuk huruf besar');
+    assert.ok(!nama.includes('NOL'), 'operator tanpa hasil tidak ditampilkan');
+    assert.deepStrictEqual(nama, ['BUDI', 'SITI', 'AGUS'], 'urut menurun berdasar rata-rata');
+    assert.strictEqual(Math.round(hasil[0].rata), 200, '4600 / 23 hari');
+  });
+
+  await test('akun SYSTEM dan mesin sama-sama disingkirkan dari peringkat', () => {
+    const hasil = laporan.ringkasOperator(CONTOH_BULAN.leaderboard, {
+      roles: ['packer', 'picker'], kecuali: ['mesin', 'system'], top: 10, hariOperasi: 23,
+    });
+    const nama = hasil.map((o) => o.nama);
+    assert.ok(!nama.includes('SYSTEM'), 'SYSTEM tidak boleh ikut walau angkanya tertinggi');
+    assert.ok(!nama.some((n) => /mesin/i.test(n)), 'mesin tetap disingkirkan');
+    assert.deepStrictEqual(nama, ['BUDI', 'SITI', 'AGUS']);
+  });
+
+  await test('peringkat dibatasi sesuai OCS_TOP_OPERATORS', () => {
+    const hasil = laporan.ringkasOperator(CONTOH_BULAN.leaderboard, {
+      roles: ['packer', 'picker'], kecuali: ['mesin', 'system'], top: 2, hariOperasi: 23,
+    });
+    assert.strictEqual(hasil.length, 2);
+  });
+
+  await test('pesan menampilkan peringkat bulan berjalan lengkap dengan periodenya', () => {
+    const data = { ...CONTOH, bulan: CONTOH_BULAN };
+    const teks = laporan.renderReport(data, {
+      now: new Date('2026-08-26T04:20:00.000Z'), tzOffsetMinutes: 420,
+      topOperators: 10, leaderboardRoles: ['packer', 'picker'], leaderboardExclude: ['mesin', 'system'],
+    });
+    assert.ok(teks.includes('TOP 2 PACKER - RATA-RATA/HARI'), teks);
+    assert.ok(teks.includes('TOP 1 PICKER - RATA-RATA/HARI'), teks);
+    assert.ok(teks.includes('1-26 Agu 2026, 23 hari operasi (dari data)'), 'label periode + dasar');
+    assert.ok(teks.includes('1. BUDI: 200/hari - total 4.600'));
+    assert.ok(!/mesin/i.test(teks.slice(teks.indexOf('TOP 2 PACKER'))), 'mesin tidak muncul di daftar');
+  });
+
+  await test('dua bagian terpisah: satu peringkat untuk tiap peran', () => {
+    const data = { ...CONTOH, bulan: CONTOH_BULAN };
+    const teks = laporan.renderReport(data, {
+      now: new Date('2026-08-26T04:20:00.000Z'), tzOffsetMinutes: 420,
+      topOperators: 10, leaderboardRoles: ['picker', 'packer'], leaderboardExclude: ['mesin', 'system'],
+    });
+    const posPicker = teks.indexOf('TOP 1 PICKER');
+    const posPacker = teks.indexOf('TOP 2 PACKER');
+    assert.ok(posPicker > 0 && posPacker > 0, 'kedua bagian ada');
+    assert.ok(posPicker < posPacker, 'urutan mengikuti OCS_LEADERBOARD_ROLES');
+    const bagianPicker = teks.slice(posPicker, posPacker);
+    assert.ok(bagianPicker.includes('SITI'), 'picker berisi picker');
+    assert.ok(!bagianPicker.includes('BUDI'), 'packer tidak bocor ke bagian picker');
+  });
+
+  await test('pembagi kalender menghitung tanggal 1 s/d hari ini', () => {
+    const p = laporan.tentukanPembagi({
+      mode: 'calendar', now: new Date('2026-08-26T04:20:00.000Z'), off: 420, offDays: [],
+    });
+    assert.strictEqual(p.hari, 26);
+    assert.strictEqual(p.dasar, 'kalender');
+  });
+
+  await test('pembagi kalender bisa mengecualikan hari libur mingguan', () => {
+    // Agustus 2026: tanggal 2, 9, 16, 23 jatuh hari Minggu
+    const p = laporan.tentukanPembagi({
+      mode: 'calendar', now: new Date('2026-08-26T04:20:00.000Z'), off: 420, offDays: [0],
+    });
+    assert.strictEqual(p.hari, 22, '26 hari dikurangi 4 hari Minggu');
+  });
+
+  await test('pembagi boleh disetel angka tetap', () => {
+    const p = laporan.tentukanPembagi({ mode: '23', throughput: [], roles: [] });
+    assert.strictEqual(p.hari, 23);
+    assert.strictEqual(p.dasar, 'disetel manual');
+  });
+
+  await test('pembagi auto memakai hari yang ada datanya', () => {
+    const p = laporan.tentukanPembagi({
+      mode: 'auto', throughput: CONTOH_BULAN.throughput, roles: ['packer'],
+    });
+    assert.strictEqual(p.hari, 23);
+    assert.strictEqual(p.dasar, 'dari data');
+  });
+
+  await test('pembagi tidak pernah nol walau data throughput kosong', () => {
+    const p = laporan.tentukanPembagi({ mode: 'auto', throughput: [], roles: ['packer'] });
+    assert.strictEqual(p.hari, 1, 'menghindari pembagian dengan nol');
+  });
+
+  await test('tanpa data bulan, peringkat kembali memakai angka hari ini', () => {
+    const teks = laporan.renderReport(CONTOH, {
+      now: new Date('2026-08-26T04:20:00.000Z'), tzOffsetMinutes: 420,
+      topOperators: 10, leaderboardRoles: [], leaderboardExclude: [],
+    });
+    assert.ok(teks.includes('- HARI INI*'), teks);
+    assert.ok(teks.includes('RICKY'));
+  });
+
+  await test('penjadwal menarik rentang bulan terpisah untuk peringkat operator', async () => {
+    const diminta = [];
+    const waPalsu = { isReady: () => true, sendText: async () => {} };
+    const clientPalsu = {
+      fetchFulfilment: async (f) => { diminta.push(['harian', f.from, f.to]); return CONTOH; },
+      fetchOperatorRange: async (f) => { diminta.push(['bulanan', f.from, f.to]); return CONTOH_BULAN; },
+    };
+    const sched = new OcsScheduler({
+      db: dbPalsu(), whatsapp: waPalsu, queue: new Queue({ delayMs: 0 }),
+      config: configPalsu({
+        leaderboard: { period: 'month', roles: ['packer', 'picker'], exclude: ['mesin', 'system'] },
+      }),
+      client: clientPalsu,
+    });
+    const hasil = await sched.runOnce();
+    assert.strictEqual(hasil.status, 'sent');
+    assert.strictEqual(diminta.length, 2, 'dua permintaan: harian + bulanan');
+    assert.strictEqual(diminta[0][0], 'harian');
+    assert.strictEqual(diminta[1][0], 'bulanan');
+    // Rentang bulanan mulai dari tanggal 1 waktu lokal. Pada TANGGAL 1 itu
+    // sendiri kedua rentang memang sama - dan itu benar, bukan kesalahan.
+    const awalBulan = laporan.monthToDateRange(new Date(), 420).from;
+    assert.strictEqual(diminta[1][1], awalBulan, 'bulanan mulai dari tanggal 1 waktu lokal');
+    assert.ok(diminta[1][1] <= diminta[0][1], 'bulanan tidak pernah mulai setelah harian');
+    assert.ok(hasil.text.includes('RATA-RATA/HARI'));
+  });
+
+  await test('period=today membuat penjadwal tidak menarik data bulanan', async () => {
+    let bulananDiminta = 0;
+    const waPalsu = { isReady: () => true, sendText: async () => {} };
+    const sched = new OcsScheduler({
+      db: dbPalsu(), whatsapp: waPalsu, queue: new Queue({ delayMs: 0 }),
+      config: configPalsu({
+        leaderboard: { period: 'today', roles: ['packer', 'picker'], exclude: ['mesin', 'system'] },
+      }),
+      client: {
+        fetchFulfilment: async () => CONTOH,
+        fetchOperatorRange: async () => { bulananDiminta += 1; return CONTOH_BULAN; },
+      },
+    });
+    await sched.runOnce();
+    assert.strictEqual(bulananDiminta, 0, 'tidak boleh ada permintaan tambahan');
+  });
+
+  /* --------------------- PENGAMAN SHUTDOWN ------------------------ */
+
+  const { pasangPengamanShutdown } = require('../src/shutdown-guard');
+
+  await test('shutdown yang menggantung dihentikan paksa setelah tenggat', async () => {
+    let keluar = 0;
+    const p = pasangPengamanShutdown(1000, () => { keluar += 1; });
+    assert.strictEqual(keluar, 0, 'belum boleh keluar sebelum tenggat');
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.strictEqual(keluar, 1, 'proses dihentikan paksa tepat sekali');
+    p.batalkan();
+  });
+
+  await test('shutdown yang selesai tepat waktu membatalkan pengaman', async () => {
+    let keluar = 0;
+    const p = pasangPengamanShutdown(1000, () => { keluar += 1; });
+    p.batalkan();
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.strictEqual(keluar, 0, 'tidak boleh keluar paksa setelah dibatalkan');
+  });
+
+  await test('tenggat shutdown tidak pernah lebih pendek dari 1 detik', () => {
+    const p = pasangPengamanShutdown(0, () => {});
+    assert.ok(p.timer, 'timer tetap dipasang');
+    p.batalkan();
+  });
+
+  await test('pengaman shutdown tidak menahan proses tetap hidup (unref)', () => {
+    const p = pasangPengamanShutdown(60000, () => {});
+    assert.ok(p.timer.hasRef === undefined || p.timer.hasRef() === false, 'timer harus unref');
+    p.batalkan();
+  });
+
+  /* ---------------------- LAPORAN STOK MENIPIS --------------------- *
+   * Murni offline: klien OCS diganti obyek palsu, WhatsApp perekam.
+   * ---------------------------------------------------------------- */
+  section('11. Laporan Stok Menipis (View V2 + Order per SKU)');
+
+  const SR = require('../src/stock-report');
+  const StockScheduler = require('../src/stock-scheduler');
+
+  const OFF = 420;   // WIB
+  const SEKARANG = new Date('2026-08-28T01:00:00.000Z');   // 08:00 WIB, 28 Agu
+
+  function stockConfigPalsu(extra = {}) {
+    return {
+      ocs: { baseUrl: 'x', username: 'u', password: 'p', database: 'd',
+        timeoutMs: 20000, tzOffsetMinutes: OFF, tzLabel: 'WIB' },
+      stock: {
+        enabled: true, hours: [8, 12, 16], groupIds: [], ambang: 1000,
+        kategori: 'Sku', hanyaAktif: true, area: '', salesDays: 90, chunkDays: 30,
+        platform: 'All', shop: 'All', avgMode: 'winsor', persentil: 95,
+        paydayMulai: 25, top: 20, detail: true, judul: 'STOK MENIPIS', ...extra,
+      },
+    };
+  }
+
+  const STOK_CONTOH = [
+    { Sku: 'CEPAT-HABIS', Name: 'Serum A', AreaId: 'Pusat', Category: 'Sku', AvailableQty: 300, IsActive: true },
+    { Sku: 'AMAN', Name: 'Serum B', AreaId: 'Pusat', Category: 'Sku', AvailableQty: 900, IsActive: true },
+    { Sku: 'TAK-LAKU', Name: 'Serum C', AreaId: 'Pusat', Category: 'Sku', AvailableQty: 50, IsActive: true },
+    { Sku: 'NONAKTIF', Name: 'Serum D', AreaId: 'Pusat', Category: 'Sku', AvailableQty: 10, IsActive: false },
+    { Sku: 'GIMMICK-X', Name: 'Bonus', AreaId: 'Pusat', Category: 'Gimmick', AvailableQty: 10, IsActive: true },
+  ];
+
+  /* ----------------------------- tanggal ---------------------------- */
+
+  await test('jendela penjualan = N hari penuh terakhir, hari ini tidak ikut', () => {
+    const r = SR.rentangPenjualan(SEKARANG, OFF, 90);
+    assert.strictEqual(r.to, '2026-08-27T17:00:00.000Z', 'berakhir 00:00 WIB hari ini');
+    assert.strictEqual(r.hari, 90);
+    const hari = SR.daftarHari(r.from, r.to, OFF);
+    assert.strictEqual(hari.length, 90);
+    assert.strictEqual(hari[hari.length - 1], '2026-08-27', 'hari terakhir = kemarin');
+    assert.ok(!hari.includes('2026-08-28'), 'hari ini yang masih berjalan tidak ikut');
+  });
+
+  await test('jendela tetap benar sesaat setelah tengah malam WIB', () => {
+    const r = SR.rentangPenjualan(new Date('2026-08-27T17:05:00.000Z'), OFF, 30);
+    const hari = SR.daftarHari(r.from, r.to, OFF);
+    assert.strictEqual(hari[hari.length - 1], '2026-08-27');
+    assert.strictEqual(hari.length, 30);
+  });
+
+  await test('double date dan payday dikenali dengan benar', () => {
+    assert.strictEqual(SR.tanggalKembar('2026-12-12'), true);
+    assert.strictEqual(SR.tanggalKembar('2026-01-01'), true);
+    assert.strictEqual(SR.tanggalKembar('2026-08-26'), false);
+    assert.strictEqual(SR.hariGajian('2026-08-25'), true);
+    assert.strictEqual(SR.hariGajian('2026-08-31'), true);
+    assert.strictEqual(SR.hariGajian('2026-08-24'), false);
+    assert.strictEqual(SR.hariPuncak('2026-08-15', {}), false, 'hari biasa');
+    assert.strictEqual(SR.hariPuncak('2026-08-26', {}), true, 'tanggal 26 masuk payday');
+    assert.strictEqual(SR.hariPuncak('2026-08-22', {}), false);
+    assert.strictEqual(SR.hariPuncak('2026-08-22', { paydayMulai: 20 }), true, 'awal payday bisa digeser');
+    assert.strictEqual(SR.hariPuncak('2026-08-08', {}), true, 'double date 8.8');
+  });
+
+  /* --------------------------- rata-rata ---------------------------- */
+
+  await test('persentil memakai interpolasi linier', () => {
+    assert.strictEqual(SR.persentil([10, 20, 30, 40, 50], 50), 30);
+    assert.strictEqual(SR.persentil([10, 20], 50), 15);
+    assert.strictEqual(SR.persentil([7], 95), 7);
+    assert.strictEqual(SR.persentil([], 95), 0);
+  });
+
+  await test('winsorize menekan lonjakan 12.12 tanpa membuang harinya', () => {
+    const hari = SR.daftarHari('2026-06-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', 0);
+    const per = new Map();
+    for (const h of hari) per.set(h, 10);
+    per.set('2026-06-15', 2000);
+
+    const penuh = SR.hitungRataHarian(per, hari, { mode: 'full' });
+    const win = SR.hitungRataHarian(per, hari, { mode: 'winsor', persentil: 95 });
+
+    assert.ok(penuh.rata > 70, `tanpa batas rata-ratanya melonjak (${penuh.rata})`);
+    assert.ok(win.rata < 15, `winsor menahan lonjakan (${win.rata})`);
+    assert.ok(win.rata >= 10, 'tetapi tidak turun di bawah penjualan harian biasa');
+  });
+
+  await test('winsorize memakai hari berpenjualan saja, SKU yang jarang laku tidak ambruk', () => {
+    const hari = [];
+    for (let i = 1; i <= 90; i += 1) hari.push(`H${String(i).padStart(3, '0')}`);
+    const per = new Map();
+    for (let i = 1; i <= 5; i += 1) per.set(hari[i], 10);
+
+    const h = SR.hitungRataHarian(per, hari, { mode: 'winsor', persentil: 95, payday: false, doubleDate: false });
+    assert.ok(Math.abs(h.rata - (50 / 90)) < 0.001,
+      `rata-rata harus 50/90 = 0,56 - bukan ${h.rata}. Nol tidak boleh ikut menghitung persentil.`);
+    assert.strictEqual(h.hariJual, 5);
+  });
+
+  await test('mode normal membuang payday & double date, mode full tidak', () => {
+    const hari = SR.daftarHari('2026-08-01T00:00:00.000Z', '2026-08-31T00:00:00.000Z', 0);
+    const per = new Map();
+    for (const h of hari) per.set(h, SR.hariPuncak(h, {}) ? 100 : 10);
+
+    const normal = SR.hitungRataHarian(per, hari, { mode: 'normal' });
+    const penuh = SR.hitungRataHarian(per, hari, { mode: 'full' });
+    assert.strictEqual(Math.round(normal.rata), 10, 'mode normal hanya melihat hari biasa');
+    assert.ok(penuh.rata > normal.rata, 'mode full lebih tinggi karena payday ikut');
+    assert.strictEqual(Math.round(normal.puncak), 100, 'angka puncak tetap dilaporkan');
+  });
+
+  await test('SKU tanpa penjualan menghasilkan rata-rata nol, bukan galat', () => {
+    const hari = SR.daftarHari('2026-08-01T00:00:00.000Z', '2026-08-11T00:00:00.000Z', 0);
+    const h = SR.hitungRataHarian(new Map(), hari, { mode: 'winsor' });
+    assert.strictEqual(h.rata, 0);
+    assert.strictEqual(h.hariJual, 0);
+  });
+
+  /* ------------------------- penyaringan ---------------------------- */
+
+  await test('saringan membuang SKU nonaktif, kategori lain, dan yang di atas ambang', () => {
+    const hasil = SR.saringStok(STOK_CONTOH, { ambang: 1000, kategori: 'Sku', hanyaAktif: true });
+    const sku = hasil.map((s) => s.Sku);
+    assert.deepStrictEqual(sku.sort(), ['AMAN', 'CEPAT-HABIS', 'TAK-LAKU']);
+    assert.ok(!sku.includes('NONAKTIF'), 'status nonaktif dibuang');
+    assert.ok(!sku.includes('GIMMICK-X'), 'kategori selain Sku dibuang');
+  });
+
+  await test('ambang bisa diubah', () => {
+    assert.strictEqual(SR.saringStok(STOK_CONTOH, { ambang: 100 }).length, 1);
+  });
+
+  await test('baris dari beberapa Area untuk SKU & hari yang sama dijumlahkan', () => {
+    const deret = SR.deretHarian([
+      { Date: '2026-08-01T00:00:00', SellerSku: 'A', Area: 'Pusat', Qty: 5 },
+      { Date: '2026-08-01T00:00:00', SellerSku: 'A', Area: 'Cabang', Qty: 7 },
+      { Date: '2026-08-02T00:00:00', SellerSku: 'A', Area: 'Pusat', Qty: 3 },
+    ], OFF);
+    assert.strictEqual(deret.get('A').get('2026-08-01'), 12);
+    assert.strictEqual(deret.get('A').get('2026-08-02'), 3);
+  });
+
+  /* --------------------------- urutan ------------------------------- */
+
+  await test('urutan laporan: sisa hari paling sedikit lebih dulu', () => {
+    const hari = SR.daftarHari('2026-08-01T00:00:00.000Z', '2026-08-11T00:00:00.000Z', 0);
+    const jual = new Map([
+      ['CEPAT-HABIS', new Map(hari.map((h) => [h, 100]))],
+      ['AMAN', new Map(hari.map((h) => [h, 10]))],
+    ]);
+    const baris = SR.susunBaris(SR.saringStok(STOK_CONTOH, {}), jual, hari, { mode: 'full' });
+    assert.strictEqual(baris[0].sku, 'CEPAT-HABIS');
+    assert.strictEqual(baris[1].sku, 'AMAN');
+    assert.strictEqual(baris[2].sku, 'TAK-LAKU', 'SKU tanpa penjualan ditaruh paling belakang');
+    assert.strictEqual(baris[2].hariCukup, null);
+    assert.strictEqual(Math.round(baris[0].hariCukup), 3);
+  });
+
+  /* --------------------------- tampilan ----------------------------- */
+
+  await test('pesan memuat SKU, Available Qty, dan Avg Daily Sales', () => {
+    const hari = SR.daftarHari('2026-08-01T00:00:00.000Z', '2026-08-11T00:00:00.000Z', 0);
+    const jual = new Map([['CEPAT-HABIS', new Map(hari.map((h) => [h, 100]))]]);
+    const baris = SR.susunBaris(SR.saringStok(STOK_CONTOH, {}), jual, hari, { mode: 'full' });
+    const teks = SR.renderStockReport({ baris, rentang: { hari: 10 } }, {
+      now: SEKARANG, tzOffsetMinutes: OFF, tzLabel: 'WIB', top: 20, ambang: 1000,
+    });
+    assert.ok(teks.includes('28 Agu 2026'), 'tanggal lokal');
+    assert.ok(teks.includes('08:00 WIB'), 'jam lokal');
+    assert.ok(teks.includes('CEPAT-HABIS'));
+    assert.ok(teks.includes('Stok *300*'), 'Available Qty');
+    assert.ok(teks.includes('Avg *100*/hari'), 'Avg Daily Sales');
+    assert.ok(teks.includes('3 hari') || teks.includes('3,0 hari'), 'sisa hari');
+  });
+
+  await test('pesan tidak pernah melewati batas panjang WhatsApp', () => {
+    const hari = SR.daftarHari('2026-08-01T00:00:00.000Z', '2026-08-11T00:00:00.000Z', 0);
+    const banyak = [];
+    const jual = new Map();
+    for (let i = 0; i < 400; i += 1) {
+      const sku = `SKU-PANJANG-SEKALI-NOMOR-${String(i).padStart(4, '0')}`;
+      banyak.push({ Sku: sku, Name: 'x', Category: 'Sku', IsActive: true, AvailableQty: 100 + i });
+      jual.set(sku, new Map(hari.map((h) => [h, 20])));
+    }
+    const baris = SR.susunBaris(banyak, jual, hari, { mode: 'full' });
+    const teks = SR.renderStockReport({ baris, rentang: { hari: 10 } }, {
+      now: SEKARANG, tzOffsetMinutes: OFF, top: 400,
+    });
+    assert.ok(teks.length < 4096, `panjang pesan ${teks.length} harus di bawah 4096`);
+    assert.ok(teks.includes('SKU lain di bawah ambang'), 'sisanya diberi keterangan');
+  });
+
+  await test('stok aman menghasilkan pesan yang jelas, bukan pesan kosong', () => {
+    const teks = SR.renderStockReport({ baris: [], rentang: { hari: 90 } }, { now: SEKARANG, tzOffsetMinutes: OFF });
+    assert.ok(teks.includes('Stok aman'));
+  });
+
+  /* --------------------------- penjadwal ---------------------------- */
+
+  function clientStokPalsu(catat = {}) {
+    return {
+      fetchLowStock: async (f) => { catat.stok = f; return STOK_CONTOH; },
+      fetchOrderPerSkuRange: async (f) => {
+        catat.jual = f;
+        return {
+          baris: [
+            { Date: '2026-08-26T00:00:00', SellerSku: 'CEPAT-HABIS', Area: 'Pusat', Qty: 100 },
+            { Date: '2026-08-27T00:00:00', SellerSku: 'CEPAT-HABIS', Area: 'Pusat', Qty: 100 },
+          ],
+          errors: [],
+        };
+      },
+    };
+  }
+
+  await test('jam kirim dihitung dalam waktu lokal', () => {
+    const s = new StockScheduler({
+      db: dbPalsu(), whatsapp: { isReady: () => true }, queue: new Queue({ delayMs: 0 }),
+      config: stockConfigPalsu(), client: clientStokPalsu(),
+    });
+    assert.ok(s.jatuhTempo(new Date('2026-08-28T01:00:00.000Z')), '08:00 WIB termasuk jam kirim');
+    assert.ok(s.jatuhTempo(new Date('2026-08-28T05:00:00.000Z')), '12:00 WIB termasuk jam kirim');
+    assert.strictEqual(s.jatuhTempo(new Date('2026-08-28T02:00:00.000Z')), null, '09:00 WIB bukan jam kirim');
+  });
+
+  await test('toleransi menit: aplikasi yang hidup pukul 08:03 tetap mengirim', () => {
+    const s = new StockScheduler({
+      db: dbPalsu(), whatsapp: { isReady: () => true }, queue: new Queue({ delayMs: 0 }),
+      config: stockConfigPalsu(), client: clientStokPalsu(),
+    });
+    assert.ok(s.jatuhTempo(new Date('2026-08-28T01:03:00.000Z')), '08:03 masih dalam toleransi');
+    assert.strictEqual(s.jatuhTempo(new Date('2026-08-28T01:30:00.000Z')), null, '08:30 sudah lewat');
+  });
+
+  await test('satu jam kirim hanya menghasilkan satu pesan walau dicek berkali-kali', () => {
+    const db = dbPalsu();
+    const s = new StockScheduler({
+      db, whatsapp: { isReady: () => true }, queue: new Queue({ delayMs: 0 }),
+      config: stockConfigPalsu(), client: clientStokPalsu(),
+    });
+    const t = new Date('2026-08-28T01:00:00.000Z');
+    const pertama = s.jatuhTempo(t);
+    assert.ok(pertama);
+    db.setSetting('stock_last_fired', pertama.kunci);
+    assert.strictEqual(s.jatuhTempo(t), null, 'jam yang sama tidak diulang setelah restart');
+    assert.ok(s.jatuhTempo(new Date('2026-08-28T05:00:00.000Z')), 'jam berikutnya tetap jalan');
+  });
+
+  await test('pengaturan dari Menu Admin menang atas .env', () => {
+    const db = dbPalsu({ stock_hours: '6,18', stock_threshold: '500', stock_top: '5', stock_avg_mode: 'full' });
+    const s = new StockScheduler({
+      db, whatsapp: { isReady: () => true }, queue: new Queue({ delayMs: 0 }),
+      config: stockConfigPalsu(), client: clientStokPalsu(),
+    });
+    const o = s.opsi();
+    assert.deepStrictEqual(o.hours, [6, 18]);
+    assert.strictEqual(o.ambang, 500);
+    assert.strictEqual(o.top, 5);
+    assert.strictEqual(o.avgMode, 'full');
+  });
+
+  await test('setOpsi menolak nilai yang tidak masuk akal', () => {
+    const s = new StockScheduler({
+      db: dbPalsu(), whatsapp: { isReady: () => true }, queue: new Queue({ delayMs: 0 }),
+      config: stockConfigPalsu(), client: clientStokPalsu(),
+    });
+    assert.throws(() => s.setOpsi('hours', 'pagi'), /jam 0-23/);
+    assert.throws(() => s.setOpsi('ambang', '-5'), /lebih dari 0/);
+    assert.throws(() => s.setOpsi('avgMode', 'ngawur'), /winsor/);
+    assert.strictEqual(s.setOpsi('hours', '7, 13 ,19'), 'Jam kirim: 07:00, 13:00, 19:00');
+    assert.strictEqual(s.setOpsi('ambang', '2.000'), 'ambang = 2.000');
+  });
+
+  await test('penjadwal menarik stok dan penjualan lalu mengirim satu pesan', async () => {
+    const catat = {};
+    const terkirim = [];
+    const s = new StockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async (gid, teks) => { terkirim.push({ gid, teks }); } },
+      config: stockConfigPalsu(), client: clientStokPalsu(catat),
+    });
+    const hasil = await s.runOnce({ paksa: true });
+    assert.strictEqual(hasil.status, 'sent');
+    assert.strictEqual(terkirim.length, 1);
+    assert.strictEqual(terkirim[0].gid, '123@g.us');
+    assert.ok(terkirim[0].teks.includes('CEPAT-HABIS'));
+    assert.strictEqual(catat.stok.ambang, 1000, 'ambang diteruskan ke OCS');
+    assert.strictEqual(catat.stok.kategori, 'Sku');
+    assert.strictEqual(catat.stok.hanyaAktif, true);
+    assert.strictEqual(catat.jual.chunkDays, 30, 'permintaan penjualan dipecah');
+  });
+
+  await test('data penjualan yang berat hanya ditarik sekali per hari (cache)', async () => {
+    let panggilan = 0;
+    const client = clientStokPalsu();
+    const asli = client.fetchOrderPerSkuRange;
+    client.fetchOrderPerSkuRange = async (f) => { panggilan += 1; return asli(f); };
+    const s = new StockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: stockConfigPalsu(), client,
+    });
+    await s.runOnce({ paksa: true });
+    await s.runOnce({ paksa: true });
+    assert.strictEqual(panggilan, 1, 'laporan kedua memakai cache, bukan menarik ulang 90 hari');
+  });
+
+  await test('tombol mati menghentikan pengiriman terjadwal, /stok tetap jalan', async () => {
+    const db = dbPalsu({ stock_enabled: '0' });
+    const terkirim = [];
+    const s = new StockScheduler({
+      db, queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => { terkirim.push(1); } },
+      config: stockConfigPalsu(), client: clientStokPalsu(),
+    });
+    assert.strictEqual(s.enabled(), false);
+    const dilewati = await s.runOnce();
+    assert.strictEqual(dilewati.status, 'skipped');
+    assert.strictEqual(terkirim.length, 0);
+    const dipaksa = await s.runOnce({ paksa: true });
+    assert.strictEqual(dipaksa.status, 'sent');
+  });
+
+  await test('group tujuan bisa dipilih, termasuk group yang tidak aktif', async () => {
+    const db = dbPalsu();
+    db.listActiveWaGroups = () => [{ group_id: 'aktif@g.us', name: 'FORWARD' }];
+    db.listWaGroups = () => [
+      { group_id: 'aktif@g.us', name: 'FORWARD' },
+      { group_id: 'khusus@g.us', name: 'LAPORAN STOK' },
+    ];
+    const terkirim = [];
+    const s = new StockScheduler({
+      db, queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async (gid) => { terkirim.push(gid); } },
+      config: stockConfigPalsu(), client: clientStokPalsu(),
+    });
+    s.setOpsi('groups', 'LAPORAN STOK');
+    await s.runOnce({ paksa: true });
+    assert.deepStrictEqual(terkirim, ['khusus@g.us'], 'hanya group yang dipilih, walau tidak aktif');
+  });
+
+  await test('nama group yang salah tulis memberi pesan galat yang jelas', async () => {
+    const s = new StockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: stockConfigPalsu(), client: clientStokPalsu(),
+    });
+    s.setOpsi('groups', 'GROUP YANG TIDAK ADA');
+    const hasil = await s.runOnce({ paksa: true });
+    assert.strictEqual(hasil.status, 'failed');
+    assert.ok(/tidak dikenal/.test(hasil.reason), hasil.reason);
+  });
+
+  await test('laporan stok tidak dikirim saat WhatsApp belum siap', async () => {
+    const s = new StockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => false, sendText: async () => { throw new Error('tidak boleh dipanggil'); } },
+      config: stockConfigPalsu(), client: clientStokPalsu(),
+    });
+    const hasil = await s.runOnce({ paksa: true });
+    assert.strictEqual(hasil.status, 'failed');
+    assert.ok(/WhatsApp belum tersambung/.test(hasil.reason));
+  });
+
+  await test('pengambilan stok & penjualan tetap hanya membaca (GET)', () => {
+    const kode = fs.readFileSync(path.join(__dirname, '..', 'src', 'ocs-client.js'), 'utf8');
+    for (const fn of ['fetchLowStock', 'fetchOrderPerSku', 'fetchOrderPerSkuRange']) {
+      assert.ok(kode.includes(fn), `${fn} harus ada`);
+    }
+    const potong = kode.slice(kode.indexOf('fetchLowStock'));
+    assert.ok(!/_request\('(POST|PUT|DELETE|PATCH)'/.test(potong),
+      'bagian stok tidak boleh menulis apa pun ke OCS');
+  });
+
+  /* --------------------- PERINGATAN LOCK STOCK --------------------- *
+   * Murni offline: klien OCS palsu, WhatsApp perekam.
+   * ---------------------------------------------------------------- */
+  section('12. Peringatan Lock Stock (reserve melebihi stok tersedia)');
+
+  const LR = require('../src/lock-report');
+  const LockScheduler = require('../src/lock-scheduler');
+
+  const STOK_LOCK = [
+    { Sku: 'POWER-MINIPORE-SERUM', AreaId: 'Pusat', AvailableQty: 432, ReserveQty: 456, IsActive: true, IsUnderReserve: true },
+    { Sku: 'BDL-NCO-00000000098', AreaId: 'Pusat', AvailableQty: 749, ReserveQty: 850, IsActive: true, IsUnderReserve: true },
+    { Sku: 'BOUNCYBLUSH-ROSEATE-2', AreaId: 'Pusat', AvailableQty: 1444, ReserveQty: 1445, IsActive: true, IsUnderReserve: true },
+    { Sku: 'FYNE-EXTRAIT-TOBACCO', AreaId: 'Pusat', AvailableQty: 5, ReserveQty: 9, IsActive: true, IsUnderReserve: true },
+    { Sku: 'SKU-AMAN', AreaId: 'Pusat', AvailableQty: 100, ReserveQty: 1, IsActive: true, IsUnderReserve: false },
+    { Sku: 'SKU-PAS', AreaId: 'Pusat', AvailableQty: 50, ReserveQty: 50, IsActive: true, IsUnderReserve: false },
+  ];
+
+  const RACK_CONTOH = [
+    { SellerSku: 'POWER-MINIPORE-SERUM', AreaId: 'Pusat', ShopCode: 'Hanasui' },
+    { SellerSku: 'BOUNCYBLUSH-ROSEATE-2', AreaId: 'Pusat', ShopCode: 'Hanasui' },
+    { SellerSku: 'FYNE-EXTRAIT-TOBACCO', AreaId: 'Pusat', ShopCode: 'FYNE' },
+    // SKU yang sama terdaftar di dua shop - barang sama, dua toko.
+    { SellerSku: 'BALMTINT-SASSY-3', AreaId: 'Pusat', ShopCode: 'Hanasui' },
+    { SellerSku: 'BALMTINT-SASSY-3', AreaId: 'Pusat', ShopCode: 'NCO' },
+  ];
+
+  function lockConfigPalsu(extra = {}) {
+    return {
+      ocs: { baseUrl: 'x', username: 'u', password: 'p', database: 'd',
+        timeoutMs: 20000, tzOffsetMinutes: 420, tzLabel: 'WIB' },
+      lock: {
+        enabled: true, intervalMinutes: 60, jitterMinutes: 7, activeHours: null,
+        groupIds: [], shops: ['NCO', 'Hanasui', 'FYNE', 'EOMMA'],
+        hanyaAktif: true, kategori: '', area: '', rackCacheMinutes: 180,
+        onlyOnChange: false, monospace: true, maxSku: 34, maxBaris: 40, ...extra,
+      },
+    };
+  }
+
+  function clientLockPalsu(catat = {}) {
+    catat.rack = 0;
+    return {
+      fetchUnderReserve: async (f) => { catat.filter = f; return (catat.stok || STOK_LOCK); },
+      fetchSkuRack: async () => { catat.rack += 1; return RACK_CONTOH; },
+    };
+  }
+
+  /* -------------------------- deteksi ------------------------------- */
+
+  await test('hanya SKU dengan reserve MELEBIHI tersedia yang diambil', () => {
+    const hasil = LR.saringTerkunci(STOK_LOCK);
+    const sku = hasil.map((s) => s.Sku);
+    assert.strictEqual(hasil.length, 4);
+    assert.ok(!sku.includes('SKU-AMAN'));
+    assert.ok(!sku.includes('SKU-PAS'), 'reserve sama dengan tersedia belum ter-lock');
+  });
+
+  await test('angka dihitung ulang sendiri, tidak bergantung bendera IsUnderReserve', () => {
+    // Bendera mengatakan aman, tetapi angkanya jelas ter-lock.
+    const bohong = [{ Sku: 'X', AvailableQty: 1, ReserveQty: 99, IsUnderReserve: false }];
+    assert.strictEqual(LR.saringTerkunci(bohong).length, 1);
+  });
+
+  /* ------------------------ pencarian shop -------------------------- */
+
+  await test('shop diambil dari Master Sku Rack', () => {
+    const peta = LR.petaShop(RACK_CONTOH);
+    assert.deepStrictEqual(peta.get('POWER-MINIPORE-SERUM'), ['Hanasui']);
+    assert.deepStrictEqual(peta.get('FYNE-EXTRAIT-TOBACCO'), ['FYNE']);
+  });
+
+  await test('SKU yang terdaftar di dua shop masuk ke daftar KEDUANYA', () => {
+    const peta = LR.petaShop(RACK_CONTOH);
+    assert.deepStrictEqual(peta.get('BALMTINT-SASSY-3').sort(), ['Hanasui', 'NCO']);
+    const grup = LR.kelompokkanPerShop(
+      [{ Sku: 'BALMTINT-SASSY-3', AreaId: 'Pusat', AvailableQty: 1, ReserveQty: 5 }], peta);
+    assert.strictEqual(grup.get('NCO').length, 1);
+    assert.strictEqual(grup.get('Hanasui').length, 1);
+    assert.strictEqual(grup.get('NCO')[0].banyakShop, true, 'ditandai agar bisa dijelaskan di pesan');
+  });
+
+  await test('bundle yang belum ada di master ditebak dari kode SKU', () => {
+    assert.strictEqual(LR.tebakShop('BDL-NCO-00000000098'), 'NCO');
+    assert.strictEqual(LR.tebakShop('BDL-HANASUI-0000001580'), 'Hanasui');
+    assert.strictEqual(LR.tebakShop('FYNE-EXTRAIT-FOUGEROYALE'), 'FYNE');
+  });
+
+  await test('tebakan hanya menerima potongan utuh, bukan sekadar mengandung huruf', () => {
+    assert.strictEqual(LR.tebakShop('NCOBALM-SESUATU'), null, 'NCOBALM bukan NCO');
+    assert.strictEqual(LR.tebakShop('SERUM-BIASA-01'), null);
+  });
+
+  await test('SKU yang tidak ketemu di mana pun tetap dilaporkan, tidak hilang diam-diam', () => {
+    const grup = LR.kelompokkanPerShop(
+      [{ Sku: 'ENTAH-APA-INI', AreaId: 'Pusat', AvailableQty: 0, ReserveQty: 3 }],
+      LR.petaShop(RACK_CONTOH));
+    assert.ok(grup.has(LR.TANPA_SHOP));
+    assert.strictEqual(grup.get(LR.TANPA_SHOP)[0].sku, 'ENTAH-APA-INI');
+  });
+
+  await test('urutan dalam satu shop: selisih terbesar lebih dulu', () => {
+    const grup = LR.kelompokkanPerShop(LR.saringTerkunci(STOK_LOCK), LR.petaShop(RACK_CONTOH));
+    const hanasui = grup.get('Hanasui').map((b) => b.sku);
+    assert.deepStrictEqual(hanasui, ['POWER-MINIPORE-SERUM', 'BOUNCYBLUSH-ROSEATE-2'],
+      'selisih 24 di atas selisih 1');
+  });
+
+  await test('TANPA SHOP selalu di urutan paling akhir', () => {
+    const grup = LR.kelompokkanPerShop([
+      { Sku: 'ENTAH', AreaId: 'Pusat', AvailableQty: 0, ReserveQty: 9 },
+      { Sku: 'POWER-MINIPORE-SERUM', AreaId: 'Pusat', AvailableQty: 0, ReserveQty: 1 },
+    ], LR.petaShop(RACK_CONTOH));
+    assert.strictEqual([...grup.keys()].pop(), LR.TANPA_SHOP);
+  });
+
+  /* --------------------------- tampilan ----------------------------- */
+
+  await test('pesan mengikuti format yang diminta, lengkap dengan tabel lurus', () => {
+    const grup = LR.kelompokkanPerShop(LR.saringTerkunci(STOK_LOCK), LR.petaShop(RACK_CONTOH));
+    const hasil = LR.renderLockAlert(
+      { shop: 'Hanasui', baris: grup.get('Hanasui'), pic: { nama: 'Ibu Sandra' } },
+      { now: new Date('2026-08-31T12:49:30.000Z'), tzOffsetMinutes: 420 }
+    );
+    const t = hasil.text;
+    assert.ok(t.startsWith('*Dear Ibu Sandra*'), t.slice(0, 40));
+    assert.ok(t.includes('PERINGATAN LOCK STOCK'));
+    assert.ok(t.includes('Ditemukan 2 SKU *_Shoop Hanasui_*'));
+    assert.ok(t.includes('(Area: Pusat)'));
+    assert.ok(t.includes('2026-08-31 19:49:30 WIB'), 'waktu lokal WIB, bukan UTC');
+    assert.ok(t.includes('SKU'), 'ada kepala tabel');
+    assert.ok(t.includes('Resv'));
+    assert.ok(t.includes('Avail'));
+    assert.ok(t.includes('*Mohon segera lepas Lock Stock sebelum terjadi Oversell.*'));
+    assert.ok(t.includes('_Sent by BOT-WRH_'));
+  });
+
+  await test('kolom tabel lurus - lebarnya mengikuti isi terpanjang', () => {
+    const teks = LR.tabelSku([
+      { sku: 'PENDEK', resv: 1, avail: 0 },
+      { sku: 'SKU-YANG-JAUH-LEBIH-PANJANG', resv: 123456, avail: 99 },
+    ], { monospace: false });
+    const baris = teks.split('\n');
+    const lebar = baris.map((b) => b.length);
+    assert.ok(lebar.every((l) => l === lebar[0]), `semua baris harus sama panjang: ${JSON.stringify(lebar)}`);
+  });
+
+  await test('tabel dibungkus monospace agar angkanya tidak bergeser di WhatsApp', () => {
+    const teks = LR.tabelSku([{ sku: 'A', resv: 1, avail: 0 }], {});
+    assert.ok(teks.startsWith('```'), 'harus diawali blok monospace');
+    assert.ok(teks.endsWith('```'));
+  });
+
+  await test('SKU yang terlalu panjang dipotong agar tabel tetap terbaca', () => {
+    const teks = LR.tabelSku([{ sku: 'X'.repeat(80), resv: 1, avail: 0 }], { monospace: false, maxSku: 20 });
+    assert.ok(teks.includes('~'), 'potongan ditandai');
+    assert.ok(!teks.includes('X'.repeat(21)));
+  });
+
+  await test('PIC dengan nomor menghasilkan mention WhatsApp sungguhan', () => {
+    const hasil = LR.renderLockAlert(
+      { shop: 'NCO', baris: [{ sku: 'A', area: 'Pusat', avail: 0, resv: 1 }],
+        pic: { nama: 'Ibu Manda', nomor: '6281234567890' } },
+      { now: new Date() }
+    );
+    assert.ok(hasil.text.includes('*Dear Ibu Manda @6281234567890*'),
+      'teks harus memuat @nomor - WhatsApp tidak mengenali mention dari nama');
+    assert.deepStrictEqual(hasil.mentions, ['6281234567890@c.us']);
+  });
+
+  await test('PIC tanpa nomor tetap disapa, hanya tanpa mention', () => {
+    const hasil = LR.renderLockAlert(
+      { shop: 'NCO', baris: [{ sku: 'A', area: 'Pusat', avail: 0, resv: 1 }], pic: { nama: 'Ibu Manda' } },
+      { now: new Date() }
+    );
+    assert.ok(hasil.text.includes('*Dear Ibu Manda*'));
+    assert.deepStrictEqual(hasil.mentions, []);
+  });
+
+  /* --------------------------- penjadwal ---------------------------- */
+
+  await test('jeda acak tetap di sekitar jeda dasar dan tidak pernah tertebak', () => {
+    const s = new LockScheduler({
+      db: dbPalsu(), whatsapp: { isReady: () => true }, queue: new Queue({ delayMs: 0 }),
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    const contoh = [];
+    for (let i = 0; i < 60; i += 1) contoh.push(s.jedaBerikutnya());
+    const min = Math.min(...contoh);
+    const max = Math.max(...contoh);
+    assert.ok(min >= 53 * 60000, `jeda terpendek ${min / 60000} menit, harus >= 53`);
+    assert.ok(max <= 68 * 60000, `jeda terpanjang ${max / 60000} menit, harus <= 68`);
+    assert.ok(new Set(contoh).size > 30, 'nilainya harus benar-benar bervariasi, bukan pola tetap');
+  });
+
+  await test('jitter 0 tetap menggeser detiknya saja', () => {
+    const s = new LockScheduler({
+      db: dbPalsu(), whatsapp: { isReady: () => true }, queue: new Queue({ delayMs: 0 }),
+      config: lockConfigPalsu({ jitterMinutes: 0 }), client: clientLockPalsu(),
+    });
+    const j = s.jedaBerikutnya();
+    assert.ok(j >= 60 * 60000 && j < 61 * 60000, `${j / 60000} menit`);
+  });
+
+  await test('jeda tidak pernah lebih pendek dari satu menit', () => {
+    const s = new LockScheduler({
+      db: dbPalsu(), whatsapp: { isReady: () => true }, queue: new Queue({ delayMs: 0 }),
+      config: lockConfigPalsu({ intervalMinutes: 5, jitterMinutes: 60 }), client: clientLockPalsu(),
+    });
+    for (let i = 0; i < 40; i += 1) assert.ok(s.jedaBerikutnya() >= 60000);
+  });
+
+  await test('satu putaran menghasilkan satu pesan PER SHOP', async () => {
+    const terkirim = [];
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async (gid, teks, m) => { terkirim.push({ gid, teks, m }); } },
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    const hasil = await s.runOnce({ paksa: true });
+    assert.strictEqual(hasil.status, 'sent');
+    assert.strictEqual(terkirim.length, 3, 'NCO, Hanasui, FYNE');
+    const shops = terkirim.map((t) => t.teks.match(/Shoop (\S+)_\*/)[1]);
+    assert.deepStrictEqual(shops, ['NCO', 'Hanasui', 'FYNE'], 'urutan mengikuti daftar shop');
+  });
+
+  await test('PIC bawaan sesuai daftar yang diminta', async () => {
+    const terkirim = [];
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async (gid, teks) => { terkirim.push(teks); } },
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    await s.runOnce({ paksa: true });
+    assert.ok(terkirim.some((t) => t.includes('Dear Ibu Manda') && t.includes('Shoop NCO')));
+    assert.ok(terkirim.some((t) => t.includes('Dear Ibu Sandra') && t.includes('Shoop Hanasui')));
+    assert.ok(terkirim.some((t) => t.includes('Dear Bpk. Reza') && t.includes('Shoop FYNE')));
+  });
+
+  await test('PIC bisa diganti dan nomornya dipakai sebagai mention', async () => {
+    const terkirim = [];
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async (gid, teks, m) => { terkirim.push({ teks, m }); } },
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    s.setPicNama('nco', 'Ibu Amanda');
+    s.setPicNomor('NCO', '6281299998888');
+    await s.runOnce({ paksa: true });
+    const nco = terkirim.find((t) => t.teks.includes('Shoop NCO'));
+    assert.ok(nco.teks.includes('Dear Ibu Amanda @6281299998888'));
+    assert.deepStrictEqual(nco.m, ['6281299998888@c.us']);
+  });
+
+  await test('nomor PIC yang salah tulis ditolak dengan penjelasan', () => {
+    const s = new LockScheduler({
+      db: dbPalsu(), whatsapp: { isReady: () => true }, queue: new Queue({ delayMs: 0 }),
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    assert.throws(() => s.setPicNomor('NCO', '+6281234567890'), /tanda \+/);
+    assert.throws(() => s.setPicNomor('NCO', '081234567890'), /0 di depan/);
+    assert.throws(() => s.setPicNomor('SHOP-HANTU', '6281234567890'), /tidak dikenal/);
+    assert.ok(/dihapus/.test(s.setPicNomor('NCO', 'hapus')));
+  });
+
+  await test('Master Sku Rack tidak ditarik ulang tiap putaran', async () => {
+    const catat = {};
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: lockConfigPalsu(), client: clientLockPalsu(catat),
+    });
+    await s.runOnce({ paksa: true });
+    await s.runOnce({ paksa: true });
+    await s.runOnce({ paksa: true });
+    assert.strictEqual(catat.rack, 1, 'master hanya ditarik sekali selama cache masih hidup');
+  });
+
+  await test('tidak ada temuan -> tidak ada pesan sama sekali', async () => {
+    const catat = { stok: [{ Sku: 'AMAN', AvailableQty: 10, ReserveQty: 0 }] };
+    const terkirim = [];
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => { terkirim.push(1); } },
+      config: lockConfigPalsu(), client: clientLockPalsu(catat),
+    });
+    const hasil = await s.runOnce({ paksa: true });
+    assert.strictEqual(hasil.status, 'clear');
+    assert.strictEqual(terkirim.length, 0);
+  });
+
+  await test('mode "hanya bila berubah" menahan pesan yang isinya sama persis', async () => {
+    const db = dbPalsu();
+    const terkirim = [];
+    const s = new LockScheduler({
+      db, queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => { terkirim.push(1); } },
+      config: lockConfigPalsu({ onlyOnChange: true }), client: clientLockPalsu(),
+    });
+    await s.runOnce();
+    const setelahPertama = terkirim.length;
+    assert.ok(setelahPertama > 0);
+    const kedua = await s.runOnce();
+    assert.strictEqual(kedua.status, 'skipped');
+    assert.strictEqual(terkirim.length, setelahPertama, 'tidak ada tambahan pesan');
+  });
+
+  await test('angka reserve yang berubah dianggap perubahan, walau SKU-nya sama', async () => {
+    const db = dbPalsu();
+    const catat = {};
+    const terkirim = [];
+    const s = new LockScheduler({
+      db, queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => { terkirim.push(1); } },
+      config: lockConfigPalsu({ onlyOnChange: true }), client: clientLockPalsu(catat),
+    });
+    catat.stok = [{ Sku: 'POWER-MINIPORE-SERUM', AreaId: 'Pusat', AvailableQty: 432, ReserveQty: 456 }];
+    await s.runOnce();
+    const sebelum = terkirim.length;
+    catat.stok = [{ Sku: 'POWER-MINIPORE-SERUM', AreaId: 'Pusat', AvailableQty: 432, ReserveQty: 900 }];
+    const kedua = await s.runOnce();
+    assert.strictEqual(kedua.status, 'sent');
+    assert.ok(terkirim.length > sebelum);
+  });
+
+  await test('tombol mati menghentikan penjadwal, /lock tetap jalan', async () => {
+    const s = new LockScheduler({
+      db: dbPalsu({ lock_enabled: '0' }), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    assert.strictEqual((await s.runOnce()).status, 'skipped');
+    assert.strictEqual((await s.runOnce({ paksa: true })).status, 'sent');
+  });
+
+  await test('lock stock tidak dikirim saat WhatsApp belum siap', async () => {
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => false, sendText: async () => { throw new Error('tidak boleh dipanggil'); } },
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    const hasil = await s.runOnce({ paksa: true });
+    assert.strictEqual(hasil.status, 'failed');
+    assert.ok(/WhatsApp belum tersambung/.test(hasil.reason));
+  });
+
+  await test('pengambilan lock stock tetap hanya membaca (GET)', () => {
+    const kode = fs.readFileSync(path.join(__dirname, '..', 'src', 'ocs-client.js'), 'utf8');
+    const potong = kode.slice(kode.indexOf('fetchUnderReserve'));
+    assert.ok(!/_request\('(POST|PUT|DELETE|PATCH)'/.test(potong),
+      'bagian lock stock tidak boleh menulis apa pun ke OCS');
   });
 
   /* ------------------------------ hasil --------------------------- */

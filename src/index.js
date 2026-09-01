@@ -10,6 +10,9 @@ const AdminMenu = require('./admin');
 const TelegramService = require('./telegram');
 const TelegramUserSource = require('./telegram-user');
 const OcsScheduler = require('./ocs-scheduler');
+const StockScheduler = require('./stock-scheduler');
+const LockScheduler = require('./lock-scheduler');
+const { pasangPengamanShutdown } = require('./shutdown-guard');
 const { KEYWORD } = require('./filter');
 
 const startedAt = Date.now();
@@ -18,6 +21,8 @@ let wa = null;
 let tg = null;
 let tgUser = null;
 let ocs = null;
+let stock = null;
+let lock = null;
 let shuttingDown = false;
 
 function banner() {
@@ -182,6 +187,32 @@ async function main() {
     logger.info('Laporan OCS tidak aktif (OCS_ENABLED belum true di .env).');
   }
 
+  // 8. Laporan "Stok Menipis" pada jam-jam tertentu
+  if (config.stock.enabled) {
+    stock = new StockScheduler({
+      db, whatsapp: wa, queue, config,
+      notifyAdmins: (teks) => tg.notifyAdmins(teks),
+    });
+    tg.stock = stock;
+    if (tg.admin) tg.admin.stock = stock;
+    stock.start();
+  } else {
+    logger.info('Laporan stok tidak aktif (STOCK_ENABLED belum true di .env).');
+  }
+
+  // 9. Peringatan LOCK STOCK (reserve melebihi stok tersedia)
+  if (config.lock.enabled) {
+    lock = new LockScheduler({
+      db, whatsapp: wa, queue, config,
+      notifyAdmins: (teks) => tg.notifyAdmins(teks),
+    });
+    tg.lock = lock;
+    if (tg.admin) tg.admin.lock = lock;
+    lock.start();
+  } else {
+    logger.info('Peringatan lock stock tidak aktif (LOCK_ENABLED belum true di .env).');
+  }
+
   await wa.start();
 
   logger.info('Aplikasi berjalan. Kirim /admin ke bot Telegram Anda untuk membuka Admin Menu.');
@@ -191,12 +222,19 @@ async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info(`Menerima ${signal}, mematikan aplikasi dengan rapi...`);
+
+  // Windows Service hanya memberi waktu terbatas untuk berhenti. Bila Chrome
+  // menggantung, `net stop` gagal dan service tersangkut di STOP_PENDING.
+  const pengaman = pasangPengamanShutdown(config.shutdownTimeoutMs);
   try { if (tg && tg.pipeline) await tg.pipeline.flushFollowUp(); } catch (e) { /* ignore */ }
   try { if (ocs) ocs.stop(); } catch (e) { /* ignore */ }
+  try { if (stock) stock.stop(); } catch (e) { /* ignore */ }
+  try { if (lock) lock.stop(); } catch (e) { /* ignore */ }
   try { if (tgUser) await tgUser.stop(); } catch (e) { /* ignore */ }
   try { if (tg) await tg.stop(); } catch (e) { /* ignore */ }
   try { if (wa) await wa.stop(); } catch (e) { /* ignore */ }
   try { if (db) db.close(); } catch (e) { /* ignore */ }
+  pengaman.batalkan();
   logger.info('Selesai. Sampai jumpa.');
   process.exit(0);
 }

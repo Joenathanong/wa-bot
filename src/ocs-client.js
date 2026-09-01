@@ -278,6 +278,159 @@ class OcsClient {
     }
     return hasil;
   }
+
+  /**
+   * Ambil HANYA leaderboard + throughput untuk satu rentang waktu.
+   * Dipakai untuk peringkat operator bulan berjalan, yang rentangnya berbeda
+   * dengan sisa laporan (harian).
+   *
+   * role sengaja dikirim 'all': penyaringan peran dilakukan di sisi kita,
+   * supaya bisa memilih lebih dari satu peran sekaligus (packer + picker).
+   */
+  async fetchOperatorRange(filter) {
+    const params = {
+      from: filter.from,
+      to: filter.to,
+      shop: filter.shop || 'All',
+      channel: filter.channel || 'All',
+      area: filter.area || 'All',
+      role: 'all',
+      shift: filter.shift || 'All',
+    };
+
+    const hasil = { from: filter.from, to: filter.to, errors: [] };
+    for (const [nama, path] of [
+      ['leaderboard', '/FulfilmentDashboard/Leaderboard'],
+      ['throughput', '/FulfilmentDashboard/Throughput'],
+    ]) {
+      try {
+        hasil[nama] = await this.getJson(path, params);
+      } catch (err) {
+        hasil[nama] = null;
+        hasil.errors.push(`${nama} (bulan berjalan): ${err.message}`);
+        logger.warn(`Bagian "${nama}" bulan berjalan gagal diambil: ${err.message}`);
+      }
+    }
+    return hasil;
+  }
+
+  /* --------------------- stok & penjualan per SKU -------------------- */
+
+  /**
+   * Daftar stok dari halaman Stocks > View V2.
+   * Penyaringan dikerjakan di sisi OCS lewat OData supaya yang terkirim
+   * lewat jaringan hanya baris yang memang dibutuhkan.
+   *
+   * @param {{ambang?: number, kategori?: string, hanyaAktif?: boolean,
+   *          area?: string}} filter
+   * @returns {Promise<Array>}
+   */
+  async fetchLowStock(filter = {}) {
+    const syarat = [];
+    if (filter.hanyaAktif !== false) syarat.push('IsActive eq true');
+    if (filter.kategori) syarat.push(`Category eq '${String(filter.kategori).replace(/'/g, "''")}'`);
+    if (filter.area) syarat.push(`AreaId eq '${String(filter.area).replace(/'/g, "''")}'`);
+    const ambang = Number.isFinite(filter.ambang) ? filter.ambang : 1000;
+    syarat.push(`AvailableQty lt ${Math.round(ambang)}`);
+
+    const hasil = await this.getJson('/odata/DTO_WmsItemStockLiteV2', {
+      $filter: syarat.join(' and '),
+      $orderby: 'AvailableQty',
+    });
+    if (!hasil) return [];
+    return Array.isArray(hasil) ? hasil : (hasil.value || []);
+  }
+
+  /**
+   * Penjualan per SKU per hari dari halaman Report > Order > Sku.
+   * @param {{from: string, to: string, platform?: string, shop?: string, area?: string}} filter
+   * @returns {Promise<Array>}
+   */
+  async fetchOrderPerSku(filter) {
+    const hasil = await this.getJson('/Report/OrderPerSkuReport', {
+      from: filter.from,
+      to: filter.to,
+      platform: filter.platform || 'All',
+      shop: filter.shop || 'All',
+      area: filter.area || 'All',
+    });
+    if (!hasil) return [];
+    return Array.isArray(hasil) ? hasil : (hasil.value || hasil.data || []);
+  }
+
+  /**
+   * Sama seperti di atas, tetapi rentang panjang dipecah menjadi beberapa
+   * permintaan. OCS menjawab 504 Gateway Timeout untuk rentang 90 hari
+   * sekaligus, sedangkan 30 hari aman (sekitar 2 MB per potong).
+   *
+   * @param {{from: string, to: string, chunkDays?: number}} filter
+   */
+  async fetchOrderPerSkuRange(filter) {
+    const potong = Math.max(1, Number(filter.chunkDays) || 30);
+    const HARI = 24 * 3600 * 1000;
+    const akhir = new Date(filter.to).getTime();
+    let mulai = new Date(filter.from).getTime();
+
+    const semua = [];
+    const errors = [];
+    let bagian = 0;
+    while (mulai < akhir) {
+      const sampai = Math.min(akhir, mulai + potong * HARI);
+      bagian += 1;
+      try {
+        const baris = await this.fetchOrderPerSku({
+          from: new Date(mulai).toISOString(),
+          to: new Date(sampai).toISOString(),
+          platform: filter.platform,
+          shop: filter.shop,
+          area: filter.area,
+        });
+        semua.push(...baris);
+        logger.debug(`Penjualan bagian ${bagian}: ${baris.length} baris`);
+      } catch (err) {
+        errors.push(`penjualan bagian ${bagian}: ${err.message}`);
+        logger.warn(`Penjualan bagian ${bagian} gagal: ${err.message}`);
+      }
+      mulai = sampai;
+    }
+    return { baris: semua, errors };
+  }
+
+  /* ------------------------- lock stock ----------------------------- */
+
+  /**
+   * SKU yang stok ter-reserve-nya melebihi stok tersedia.
+   * OCS sudah menyediakan bendera IsUnderReserve yang persis berarti
+   * ReserveQty > AvailableQty, tetapi pemanggil tetap memeriksa ulang
+   * angkanya sendiri supaya laporan tidak pernah bergantung pada satu
+   * bendera saja.
+   *
+   * @param {{hanyaAktif?: boolean, kategori?: string, area?: string}} filter
+   */
+  async fetchUnderReserve(filter = {}) {
+    const syarat = ['ReserveQty gt AvailableQty'];
+    if (filter.hanyaAktif !== false) syarat.push('IsActive eq true');
+    if (filter.kategori) syarat.push(`Category eq '${String(filter.kategori).replace(/'/g, "''")}'`);
+    if (filter.area) syarat.push(`AreaId eq '${String(filter.area).replace(/'/g, "''")}'`);
+
+    const hasil = await this.getJson('/odata/DTO_WmsItemStockLiteV2', {
+      $filter: syarat.join(' and '),
+      $orderby: 'Sku',
+    });
+    if (!hasil) return [];
+    return Array.isArray(hasil) ? hasil : (hasil.value || []);
+  }
+
+  /**
+   * Master Sku Rack - satu-satunya sumber pemetaan SellerSku -> ShopCode.
+   * Tidak menerima parameter apa pun; seluruh isinya (sekitar 700 baris,
+   * ~220 KB) dikembalikan sekaligus.
+   */
+  async fetchSkuRack() {
+    const hasil = await this.getJson('/MasterData/GetSkuRack');
+    if (!hasil) return [];
+    return Array.isArray(hasil) ? hasil : (hasil.value || hasil.data || []);
+  }
 }
 
 function buildQuery(params) {
