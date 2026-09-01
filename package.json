@@ -19,7 +19,8 @@
     "service:status": "node scripts/service-status.js",
     "db:backup": "node scripts/backup-db.js",
     "stock:test": "node scripts/stock-test.js",
-    "lock:test": "node scripts/lock-test.js"
+    "lock:test": "node scripts/lock-test.js",
+    "wa:diag": "node scripts/wa-diag.js"
   },
   "engines": {
     "node": ">=18.0.0"

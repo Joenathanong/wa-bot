@@ -1792,6 +1792,41 @@ SKU yang stoknya rendah tetapi tidak ada penjualannya sama sekali ditaruh
 paling belakang; stoknya memang rendah, tetapi tidak ada yang membelinya.
 Pesan dipotong otomatis agar tidak pernah melewati batas WhatsApp.
 
+### 21b. Diagnosa koneksi WhatsApp
+
+```cmd
+npm run wa:diag
+```
+
+Mengumpulkan dalam satu perintah semua yang dibutuhkan untuk menentukan
+kenapa WhatsApp tidak pernah siap. Tidak menyambung ke WhatsApp dan tidak
+mengubah apa pun - aman dijalankan sementara service berjalan.
+
+Yang diperiksa:
+
+1. **Pengaturan** - `CHROME_PATH`, `WA_WEB_VERSION`, `WA_READY_TIMEOUT_MS`
+2. **Folder sesi** - ukuran, keberadaan `Default/`, dan **berkas kunci**
+   (`SingletonLock`) yang menandakan Chrome lama masih memegang folder
+3. **Proses Chrome** yang sedang berjalan
+4. **Jaringan** ke `web.whatsapp.com` dan `ocs.iegsystem.id`
+5. **Riwayat log** - berapa kali QR dibuat, authenticated, ready, macet,
+   logout; dan **tahap macet terakhir**
+
+Ditutup dengan daftar temuan beserta penanganannya. Kalau tetap buntu,
+kirimkan seluruh keluarannya.
+
+**Tiga penyebab yang paling sering, dan bedanya:**
+
+| Di log tertulis | Artinya | Penanganan |
+|---|---|---|
+| `macet di "qr"` | Tidak ada yang memindai QR | **Tidak sembuh sendiri.** Pindai QR yang dikirim ke chat admin Telegram |
+| `macet di "authenticated"` | Build WhatsApp Web tidak cocok | Setel `WA_WEB_VERSION` (bab 13) |
+| `The browser is already running` | Chrome lama memegang folder sesi | `taskkill /F /IM chrome.exe /T` lalu restart service |
+
+Yang ketiga pernah terjadi di mesin ini: **31 percobaan gagal
+berturut-turut** dengan pesan itu, dan baru berhasil setelah proses
+Chrome lamanya mati sendiri. Kalau pesan itu muncul, jangan menunggu.
+
 ### 22.8 Kalau gagal
 
 | Gejala | Sebab yang paling sering |
