@@ -160,41 +160,89 @@ class TelegramService {
       case '/start':
       case '/help': {
         const isAdmin = this.config.isAdmin(userId);
-        await this.bot.sendMessage(chatId, [
-          '🤖 TELEGRAM → WHATSAPP BOT',
+
+        // Bantuan dikelompokkan per "bot": tiap kelompok berdiri sendiri,
+        // punya tombol on/off dan group tujuan sendiri, sehingga satu
+        // kelompok bisa dimatikan tanpa mengganggu yang lain.
+        // Baris kosong di sini SENGAJA - jangan pakai .filter(Boolean) saat
+        // menggabungkan, karena itu ikut membuang pemisah antar kelompok
+        // dan seluruh bantuan menempel jadi satu blok.
+        const umum = [
+          '*BOT GUDANG - IEG*',
           '',
-          'Bot ini meneruskan peringatan stok dari Telegram ke WhatsApp Group,',
-          'lalu mengirim pesan follow-up dengan mention ke user yang terdaftar.',
+          'Empat bot berdiri sendiri di dalam satu aplikasi.',
+          'Masing-masing punya tombol on/off dan group tujuan sendiri.',
           '',
-          'Perintah:',
+          '*UMUM*',
           '/id      - tampilkan Chat ID & User ID',
           '/status  - status koneksi bot',
-          isAdmin ? '/admin   - buka Admin Menu' : '',
-          isAdmin ? '/groups  - atur WhatsApp Group tujuan' : '',
-          isAdmin ? '/wadiag  - diagnosa daftar group WhatsApp' : '',
-          isAdmin ? '/ocs     - kirim laporan Fulfilment Dashboard sekarang' : '',
-          isAdmin ? '/ocsstatus - status penjadwal laporan OCS' : '',
-          isAdmin ? '/ocson, /ocsoff - nyalakan / matikan laporan berkala' : '',
-          isAdmin ? '/stok    - kirim laporan Stok Menipis sekarang' : '',
-          isAdmin ? '/stokstatus - pengaturan & status laporan stok' : '',
-          isAdmin ? '/stokon, /stokoff - nyalakan / matikan laporan stok' : '',
-          isAdmin ? '/stokjam 8,12,16 - jam kirim laporan stok' : '',
-          isAdmin ? '/stokambang 1000 - batas stok yang dianggap menipis' : '',
-          isAdmin ? '/stoktop 20 - jumlah SKU yang ditampilkan' : '',
-          isAdmin ? '/stokhari 90 - jendela hari untuk rata-rata penjualan' : '',
-          isAdmin ? '/stokmode winsor - cara menghitung rata-rata' : '',
-          isAdmin ? '/stokgroup - group WhatsApp tujuan laporan stok' : '',
-          isAdmin ? '/lock    - periksa & kirim peringatan LOCK STOCK sekarang' : '',
-          isAdmin ? '/lockstatus - pengaturan, PIC, dan jadwal berikutnya' : '',
-          isAdmin ? '/lockon, /lockoff - nyalakan / matikan pemeriksaan berkala' : '',
-          isAdmin ? '/lockpic <Shop> <Nama> - nama PIC tiap shop' : '',
-          isAdmin ? '/lockwa <Shop> <Nomor> - nomor PIC agar di-mention sungguhan' : '',
-          isAdmin ? '/lockjeda 60 7 - jeda menit + penyimpangan acak' : '',
-          isAdmin ? '/lockgroup - group WhatsApp tujuan peringatan lock' : '',
-          isAdmin ? '/lockulang on|off - ulangi pesan yang sama tiap jam?' : '',
+          ...(isAdmin ? [
+            '/admin   - buka Admin Menu',
+            '/groups  - daftar & aktifkan WhatsApp Group',
+            '/wadiag  - diagnosa daftar group WhatsApp',
+          ] : []),
+        ];
+
+        const forwarder = [
           '',
-          isAdmin ? '' : 'Anda bukan administrator bot ini.',
-        ].filter(Boolean).join('\n'));
+          '*1. FORWARDER TELEGRAM -> WHATSAPP*',
+          '_Meneruskan peringatan stok dari grup Telegram, lalu mengirim_',
+          '_pesan follow-up dengan mention ke user yang terdaftar._',
+          '/keyword - lihat keyword pemicu forwarding',
+          'Tombol on/off & template: /admin > Pengaturan',
+          'Group tujuan: group yang AKTIF di /groups',
+        ];
+
+        const fulfilment = [
+          '',
+          '*2. LAPORAN FULFILMENT DASHBOARD*',
+          '_Ringkasan SLA, WIP, throughput, dan peringkat operator dari OCS._',
+          '/ocs       - kirim laporan sekarang',
+          '/ocsstatus - jadwal & status',
+          '/ocson, /ocsoff - nyalakan / matikan laporan berkala',
+        ];
+
+        const stok = [
+          '',
+          '*3. LAPORAN STOK MENIPIS*',
+          '_SKU di bawah ambang, lengkap dengan rata-rata penjualan harian_',
+          '_dan perkiraan stok cukup untuk berapa hari lagi._',
+          '/stok       - kirim laporan sekarang',
+          '/stokstatus - pengaturan & status',
+          '/stokon, /stokoff - nyalakan / matikan laporan',
+          '/stokjam 8,12,16  - jam kirim',
+          '/stokambang 1000  - batas stok yang dianggap menipis',
+          '/stoktop 20       - jumlah SKU yang ditampilkan',
+          '/stokhari 90      - jendela hari untuk rata-rata penjualan',
+          '/stokmode winsor  - cara menghitung rata-rata',
+          '/stokgroup        - group WhatsApp tujuan',
+        ];
+
+        const lock = [
+          '',
+          '*4. PERINGATAN LOCK STOCK*',
+          '_SKU yang stok ter-reserve-nya melebihi stok tersedia._',
+          '_Satu pesan per Shop, disapa ke PIC masing-masing._',
+          '/lock       - periksa & kirim sekarang',
+          '/lockstatus - pengaturan, PIC, jadwal berikutnya',
+          '/lockon, /lockoff - nyalakan / matikan pemeriksaan',
+          '/lockpic <Shop> <Nama>  - nama PIC tiap shop',
+          '/lockwa <Shop> <Nomor>  - nomor PIC agar di-mention',
+          '/lockjeda 60 7    - jeda menit + penyimpangan acak',
+          '/lockgroup        - group WhatsApp tujuan',
+          '/lockulang on|off - ulangi pesan yang sama tiap jam?',
+        ];
+
+        const kaki = isAdmin
+          ? ['', '_Uji tanpa mengirim ke WhatsApp:_',
+             '_npm run ocs:test | stock:test | lock:test_']
+          : ['', 'Anda bukan administrator bot ini.'];
+
+        const baris = isAdmin
+          ? [...umum, ...forwarder, ...fulfilment, ...stok, ...lock, ...kaki]
+          : [...umum, ...kaki];
+
+        await this.bot.sendMessage(chatId, baris.join('\n'), { parse_mode: 'Markdown' });
         return true;
       }
 

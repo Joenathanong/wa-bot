@@ -1567,6 +1567,62 @@ async function run() {
     assert.strictEqual(waSent()[1].mentions.length, 2);
   });
 
+  await test('/help dikelompokkan per bot, berurutan 1-4', async () => {
+    bot.outbox.length = 0;
+    await send('/help');
+    const teks = bot.outbox[bot.outbox.length - 1].text;
+    const urut = [
+      '*1. FORWARDER TELEGRAM -> WHATSAPP*',
+      '*2. LAPORAN FULFILMENT DASHBOARD*',
+      '*3. LAPORAN STOK MENIPIS*',
+      '*4. PERINGATAN LOCK STOCK*',
+    ];
+    let posisi = -1;
+    for (const judul of urut) {
+      const i = teks.indexOf(judul);
+      assert.ok(i > posisi, `"${judul}" tidak ada atau urutannya salah`);
+      posisi = i;
+    }
+    // Tiap perintah harus berada di bawah judul kelompoknya sendiri.
+    assert.ok(teks.indexOf('/ocsstatus') > teks.indexOf(urut[1]));
+    assert.ok(teks.indexOf('/ocsstatus') < teks.indexOf(urut[2]));
+    assert.ok(teks.indexOf('/stokjam') > teks.indexOf(urut[2]));
+    assert.ok(teks.indexOf('/stokjam') < teks.indexOf(urut[3]));
+    assert.ok(teks.indexOf('/lockwa') > teks.indexOf(urut[3]));
+  });
+
+  await test('kelompok /help dipisah baris kosong, tidak menempel jadi satu blok', async () => {
+    bot.outbox.length = 0;
+    await send('/help');
+    const teks = bot.outbox[bot.outbox.length - 1].text;
+    for (const judul of ['*1. FORWARDER', '*2. LAPORAN FULFILMENT', '*3. LAPORAN STOK', '*4. PERINGATAN LOCK']) {
+      const i = teks.indexOf(judul);
+      assert.ok(teks.slice(i - 2, i) === '\n\n', `harus ada baris kosong sebelum ${judul}`);
+    }
+  });
+
+  await test('penanda Markdown /help berpasangan - kalau tidak, Telegram menolak pesannya', async () => {
+    bot.outbox.length = 0;
+    await send('/help');
+    const pesan = bot.outbox[bot.outbox.length - 1];
+    assert.strictEqual(pesan.opts.parse_mode, 'Markdown');
+    for (const tanda of ['*', '_']) {
+      const jumlah = pesan.text.split(tanda).length - 1;
+      assert.strictEqual(jumlah % 2, 0,
+        `jumlah "${tanda}" ganjil (${jumlah}) - Telegram akan menolak seluruh pesan /help`);
+    }
+  });
+
+  await test('bukan admin hanya melihat bagian umum', async () => {
+    bot.outbox.length = 0;
+    await send('/help', OUTSIDER, 7777);
+    const teks = bot.outbox[bot.outbox.length - 1].text;
+    assert.ok(teks.includes('Anda bukan administrator'));
+    for (const rahasia of ['/lockwa', '/stokjam', '/ocson', '/admin']) {
+      assert.ok(!teks.includes(rahasia), `${rahasia} tidak boleh terlihat oleh non-admin`);
+    }
+  });
+
   await test('pesan yang sama dua kali tidak dikirim ulang', async () => {
     global.__WA_STUB__.sent = [];
     await gram.emitMessage({ id: 9001, message: TELEGRAM_SAMPLE, peerId: { className: 'PeerChannel', channelId: 999 } });
