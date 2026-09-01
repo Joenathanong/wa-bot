@@ -373,6 +373,7 @@ class OcsClient {
 
     const semua = [];
     const errors = [];
+    const berhasil = [];      // rentang yang BENAR-BENAR berhasil ditarik
     let bagian = 0;
     while (mulai < akhir) {
       const sampai = Math.min(akhir, mulai + potong * HARI);
@@ -386,6 +387,7 @@ class OcsClient {
           area: filter.area,
         });
         semua.push(...baris);
+        berhasil.push({ from: new Date(mulai).toISOString(), to: new Date(sampai).toISOString() });
         logger.debug(`Penjualan bagian ${bagian}: ${baris.length} baris`);
       } catch (err) {
         errors.push(`penjualan bagian ${bagian}: ${err.message}`);
@@ -393,7 +395,12 @@ class OcsClient {
       }
       mulai = sampai;
     }
-    return { baris: semua, errors };
+
+    // PENTING: rentang yang gagal HARUS ikut dikeluarkan dari pembagi.
+    // Kalau tidak, penjualannya hilang tetapi harinya tetap dihitung -
+    // rata-rata jadi terlalu rendah persis pada saat data sedang bermasalah,
+    // dan peringatan stok habis datang terlambat tanpa ada yang sadar.
+    return { baris: semua, errors, berhasil };
   }
 
   /* ------------------------- lock stock ----------------------------- */

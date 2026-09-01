@@ -193,16 +193,33 @@ const config = {
     // (JID 120...@g.us atau nama group, dipisah koma).
     groupIds: parseIdList(process.env.STOCK_GROUP_IDS),
 
-    // Kriteria penyaringan di halaman View V2
-    ambang: Math.max(0, toInt(process.env.STOCK_THRESHOLD, 1000)),
+    // KRITERIA UTAMA: DOI (Days of Inventory) = stok / rata-rata harian.
+    // Menjawab "kapan habis", bukan sekadar "stoknya sedikit" - sehingga
+    // SKU laris berstok besar yang habis 4 hari lagi ikut tertangkap,
+    // dan barang lambat berstok kecil tidak membanjiri laporan.
+    doiMax: Math.max(0, toInt(process.env.STOCK_DOI_MAX, 7)),
+    // Saringan tambahan jumlah stok. 0 = TANPA batas (bawaan), karena
+    // DOI sudah menjadi kriterianya.
+    ambang: Math.max(0, toInt(process.env.STOCK_THRESHOLD, 0)),
+    // Abaikan SKU yang rata-ratanya di bawah ini. 0 = tampilkan semua.
+    // Berguna untuk menyingkirkan barang yang lakunya sangat jarang.
+    minAvg: Math.max(0, Number(process.env.STOCK_MIN_AVG) || 0),
     kategori: (process.env.STOCK_CATEGORY || 'Sku').trim(),
     hanyaAktif: String(process.env.STOCK_ACTIVE_ONLY || 'true').toLowerCase() !== 'false',
     area: (process.env.STOCK_AREA || '').trim(),
 
-    // Jendela penjualan untuk Avg Daily Sales
-    salesDays: Math.max(7, toInt(process.env.STOCK_SALES_DAYS, 90)),
-    // OCS menjawab 504 bila diminta 90 hari sekaligus - dipecah per potong.
-    chunkDays: Math.max(1, toInt(process.env.STOCK_CHUNK_DAYS, 30)),
+    // Jendela penjualan untuk Avg Daily Sales.
+    //
+    // 30 hari, BUKAN 90. Angkanya dipakai untuk menjawab "habis dalam 7
+    // hari ke depan?" - pertanyaan jangka pendek, yang jauh lebih baik
+    // dijawab permintaan terkini daripada rata-rata tiga bulan. Panjangnya
+    // sengaja kelipatan ~30 hari supaya tepat memuat satu siklus bulanan
+    // penuh (gajian 25-31 dan tanggal tua 20-24), sehingga tidak berat
+    // sebelah tergantung tanggal berapa laporan dijalankan.
+    salesDays: Math.max(7, toInt(process.env.STOCK_SALES_DAYS, 30)),
+    // OCS kadang menjawab galat untuk rentang 30 hari (teramati langsung),
+    // dan pasti 504 untuk 90 hari. 15 hari terbukti aman.
+    chunkDays: Math.max(1, toInt(process.env.STOCK_CHUNK_DAYS, 15)),
     platform: (process.env.STOCK_PLATFORM || 'All').trim(),
     shop: (process.env.STOCK_SHOP || 'All').trim(),
 

@@ -1652,6 +1652,24 @@ async function run() {
     assert.strictEqual(waSent().length, 0);
   });
 
+  await test('peristiwa "stuck" menyertakan TAHAP-nya, bukan sekadar hitungan', () => {
+    const kode = fs.readFileSync(path.join(__dirname, '..', 'src', 'whatsapp.js'), 'utf8');
+    assert.ok(/this\.emit\('stuck', this\.stuckCount, this\.state\)/.test(kode),
+      'tanpa tahap, "menunggu QR dipindai" dan "build tidak cocok" tidak bisa dibedakan');
+  });
+
+  await test('pemberitahuan macet memberi penanganan yang berbeda per tahap', () => {
+    const kode = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
+    const blok = kode.slice(kode.indexOf("wa.on('stuck'"), kode.indexOf("wa.on('recovering'"));
+    assert.ok(/tahap === 'qr'/.test(blok), 'tahap qr harus ditangani sendiri');
+    assert.ok(/Perangkat Tertaut/.test(blok), 'tahap qr: suruh pindai QR');
+    assert.ok(/tidak akan pernah selesai sendiri/.test(blok),
+      'tahap qr tidak sembuh sendiri - itu harus dikatakan');
+    assert.ok(/tahap === 'authenticated'/.test(blok));
+    assert.ok(/WA_WEB_VERSION/.test(blok), 'tahap authenticated: sematkan build');
+    assert.ok(/taskkill \/F \/IM chrome\.exe/.test(blok), 'tahap lain: kemungkinan Chrome nyangkut');
+  });
+
   await test('JAMINAN READ-ONLY: tidak ada pemanggilan kirim/join di modul akun', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'telegram-user.js'), 'utf8');
     const code = src.replace(/^\s*\*.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
@@ -2592,6 +2610,95 @@ async function run() {
 
   /* --------------------------- urutan ------------------------------- */
 
+  /* ------------------------- kriteria DOI --------------------------- */
+
+  await test('DOI menangkap SKU laris berstok besar yang ambang jumlah lewatkan', () => {
+    const hari = SR.daftarHari('2026-08-01T00:00:00.000Z', '2026-08-11T00:00:00.000Z', 0);
+    const stok = [
+      { Sku: 'LARIS-STOK-BESAR', Category: 'Sku', IsActive: true, AvailableQty: 2000 },
+      { Sku: 'LAMBAT-STOK-KECIL', Category: 'Sku', IsActive: true, AvailableQty: 300 },
+    ];
+    const jual = new Map([
+      ['LARIS-STOK-BESAR', new Map(hari.map((h) => [h, 500]))],    // habis 4 hari
+      ['LAMBAT-STOK-KECIL', new Map(hari.map((h) => [h, 2]))],     // cukup 150 hari
+    ]);
+    const baris = SR.susunBaris(SR.saringStok(stok, { ambang: 0 }), jual, hari, { mode: 'full' });
+    const hasil = SR.saringDoi(baris, { doiMax: 7 });
+    assert.deepStrictEqual(hasil.map((b) => b.sku), ['LARIS-STOK-BESAR'],
+      'yang stoknya 2.000 justru yang mendesak; yang 300 masih cukup 5 bulan');
+  });
+
+  await test('ambang 0 berarti tanpa batas jumlah, bukan menyaring habis', () => {
+    const stok = [{ Sku: 'A', Category: 'Sku', IsActive: true, AvailableQty: 999999 }];
+    assert.strictEqual(SR.saringStok(stok, { ambang: 0 }).length, 1);
+    assert.strictEqual(SR.saringStok(stok, { ambang: 1000 }).length, 0);
+  });
+
+  await test('SKU tanpa penjualan tidak ikut kriteria DOI', () => {
+    const hari = SR.daftarHari('2026-08-01T00:00:00.000Z', '2026-08-11T00:00:00.000Z', 0);
+    const stok = [{ Sku: 'TAK-LAKU', Category: 'Sku', IsActive: true, AvailableQty: 1 }];
+    const baris = SR.susunBaris(stok, new Map(), hari, { mode: 'full' });
+    assert.strictEqual(baris[0].hariCukup, null);
+    assert.strictEqual(SR.saringDoi(baris, { doiMax: 7 }).length, 0,
+      'stoknya 1 tetapi tidak ada yang membeli - tidak akan habis');
+  });
+
+  await test('minAvg menyingkirkan SKU yang lakunya sangat jarang', () => {
+    const hari = SR.daftarHari('2026-08-01T00:00:00.000Z', '2026-08-11T00:00:00.000Z', 0);
+    const stok = [{ Sku: 'JARANG', Category: 'Sku', IsActive: true, AvailableQty: 0 }];
+    const jual = new Map([['JARANG', new Map([[hari[0], 1]])]]);   // 1 pcs / 10 hari
+    const baris = SR.susunBaris(stok, jual, hari, { mode: 'full' });
+    assert.strictEqual(SR.saringDoi(baris, { doiMax: 7 }).length, 1, 'tanpa minAvg tetap muncul');
+    assert.strictEqual(SR.saringDoi(baris, { doiMax: 7, minAvg: 1 }).length, 0);
+  });
+
+  await test('baris kriteria di pesan menyebut saringan yang benar-benar berlaku', () => {
+    assert.strictEqual(SR.kriteria({ doiMax: 7 }, 0), 'DOI < 7 hari');
+    assert.strictEqual(SR.kriteria({ doiMax: 7 }, 1000), 'DOI < 7 hari | stok < 1.000');
+    assert.strictEqual(SR.kriteria({ doiMax: 0 }, 0), 'seluruh SKU');
+    assert.strictEqual(SR.kriteria({ doiMax: 7, minAvg: 2 }, 0), 'DOI < 7 hari | min 2/hari');
+  });
+
+  /* --------------------------- PIC laporan stok ---------------------- */
+
+  await test('laporan stok menyapa & me-mention PIC-nya sendiri', async () => {
+    const terkirim = [];
+    const s = new StockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async (gid, teks, m) => { terkirim.push({ teks, m }); } },
+      config: stockConfigPalsu({ doiMax: 0 }), client: clientStokPalsu(),
+    });
+    s.setPicNama('Ibu Ani, Bpk. Budi');
+    s.setPicNomor('6281111111111, 6282222222222');
+    await s.runOnce({ paksa: true });
+    assert.ok(terkirim[0].teks.startsWith('*Dear Ibu Ani @6281111111111 & Bpk. Budi @6282222222222*'),
+      terkirim[0].teks.split('\n')[0]);
+    assert.deepStrictEqual(terkirim[0].m, ['6281111111111@c.us', '6282222222222@c.us']);
+  });
+
+  await test('PIC laporan stok TERPISAH dari PIC lock stock', () => {
+    const db = dbPalsu();
+    const s = new StockScheduler({
+      db, queue: new Queue({ delayMs: 0 }), whatsapp: { isReady: () => true },
+      config: stockConfigPalsu(), client: clientStokPalsu(),
+    });
+    s.setPicNama('Ibu Ani');
+    assert.ok(db._store.stock_pic, 'tersimpan di kunci stock_pic');
+    assert.ok(!db._store.lock_pic, 'tidak menyentuh pengaturan lock stock');
+  });
+
+  await test('tanpa PIC, laporan stok tetap terkirim tanpa sapaan', async () => {
+    const terkirim = [];
+    const s = new StockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async (gid, teks, m) => { terkirim.push({ teks, m }); } },
+      config: stockConfigPalsu({ doiMax: 0 }), client: clientStokPalsu(),
+    });
+    await s.runOnce({ paksa: true });
+    assert.ok(!terkirim[0].teks.includes('Dear'));
+    assert.deepStrictEqual(terkirim[0].m, []);
+  });
+
   await test('urutan laporan: sisa hari paling sedikit lebih dulu', () => {
     const hari = SR.daftarHari('2026-08-01T00:00:00.000Z', '2026-08-11T00:00:00.000Z', 0);
     const jual = new Map([
@@ -2637,7 +2744,7 @@ async function run() {
       now: SEKARANG, tzOffsetMinutes: OFF, top: 400,
     });
     assert.ok(teks.length < 4096, `panjang pesan ${teks.length} harus di bawah 4096`);
-    assert.ok(teks.includes('SKU lain di bawah ambang'), 'sisanya diberi keterangan');
+    assert.ok(teks.includes('SKU lain yang memenuhi kriteria'), 'sisanya diberi keterangan');
   });
 
   await test('stok aman menghasilkan pesan yang jelas, bukan pesan kosong', () => {
@@ -2715,7 +2822,9 @@ async function run() {
       config: stockConfigPalsu(), client: clientStokPalsu(),
     });
     assert.throws(() => s.setOpsi('hours', 'pagi'), /jam 0-23/);
-    assert.throws(() => s.setOpsi('ambang', '-5'), /lebih dari 0/);
+    assert.throws(() => s.setOpsi('ambang', '-5'), /0 atau lebih/);
+    assert.throws(() => s.setOpsi('top', '0'), /lebih dari 0/);
+    assert.ok(/dimatikan/.test(s.setOpsi('ambang', '0')), 'ambang 0 sah = tanpa batas jumlah');
     assert.throws(() => s.setOpsi('avgMode', 'ngawur'), /winsor/);
     assert.strictEqual(s.setOpsi('hours', '7, 13 ,19'), 'Jam kirim: 07:00, 13:00, 19:00');
     assert.strictEqual(s.setOpsi('ambang', '2.000'), 'ambang = 2.000');
@@ -2738,6 +2847,40 @@ async function run() {
     assert.strictEqual(catat.stok.kategori, 'Sku');
     assert.strictEqual(catat.stok.hanyaAktif, true);
     assert.strictEqual(catat.jual.chunkDays, 30, 'permintaan penjualan dipecah');
+  });
+
+  await test('potongan yang GAGAL ikut dikeluarkan dari pembagi rata-rata', async () => {
+    // 10 hari diminta, tetapi separuhnya gagal ditarik. Kalau harinya tetap
+    // dihitung, rata-rata jatuh setengahnya dan peringatan datang terlambat.
+    const client = {
+      fetchLowStock: async () => [{ Sku: 'A', Category: 'Sku', IsActive: true, AvailableQty: 100 }],
+      fetchOrderPerSkuRange: async () => ({
+        baris: [
+          { Date: '2026-08-27T00:00:00', SellerSku: 'A', Qty: 10 },
+          { Date: '2026-08-28T00:00:00', SellerSku: 'A', Qty: 10 },
+        ],
+        errors: ['penjualan bagian 1: HTTP 504'],
+        berhasil: [{ from: '2026-08-26T17:00:00.000Z', to: '2026-08-28T17:00:00.000Z' }],
+      }),
+    };
+    const s = new StockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: stockConfigPalsu({ salesDays: 10, doiMax: 0 }), client,
+    });
+    const data = await s.ambilData();
+    assert.strictEqual(data.hariList.length, 2,
+      'pembagi harus 2 hari yang berhasil, bukan 10 hari yang diminta');
+    const a = data.baris.find((b) => b.sku === 'A');
+    assert.strictEqual(Math.round(a.rata), 10, `rata-rata harus 20/2 = 10, bukan 20/10 = 2 (dapat ${a.rata})`);
+  });
+
+  await test('daftarHariGabungan menyatukan rentang tanpa duplikat', () => {
+    const hari = SR.daftarHariGabungan([
+      { from: '2026-08-01T00:00:00.000Z', to: '2026-08-04T00:00:00.000Z' },
+      { from: '2026-08-03T00:00:00.000Z', to: '2026-08-06T00:00:00.000Z' },
+    ], 0);
+    assert.deepStrictEqual(hari, ['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05']);
   });
 
   await test('data penjualan yang berat hanya ditarik sekali per hari (cache)', async () => {

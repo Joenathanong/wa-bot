@@ -211,7 +211,11 @@ class TelegramService {
           '/stokstatus - pengaturan & status',
           '/stokon, /stokoff - nyalakan / matikan laporan',
           '/stokjam 8,12,16  - jam kirim',
-          '/stokambang 1000  - batas stok yang dianggap menipis',
+          '/stokdoi 7        - tampilkan SKU yang stoknya cukup < 7 hari',
+          '/stokambang 0     - batas jumlah stok (0 = tanpa batas)',
+          '/stokminavg 0     - abaikan SKU yang lakunya di bawah sekian/hari',
+          '/stokpic <Nama>   - PIC laporan stok (boleh >1, pisah koma)',
+          '/stokwa <Nomor>   - nomor PIC agar di-mention (urut, pisah koma)',
           '/stoktop 20       - jumlah SKU yang ditampilkan',
           '/stokhari 90      - jendela hari untuk rata-rata penjualan',
           '/stokmode winsor  - cara menghitung rata-rata',
@@ -367,6 +371,10 @@ class TelegramService {
       case '/stokon':
       case '/stokoff':
       case '/stokjam':
+      case '/stokdoi':
+      case '/stokminavg':
+      case '/stokpic':
+      case '/stokwa':
       case '/stokambang':
       case '/stoktop':
       case '/stokhari':
@@ -411,9 +419,27 @@ class TelegramService {
           return true;
         }
 
+        if (cmd === '/stokpic' || cmd === '/stokwa') {
+          try {
+            const pesan = cmd === '/stokpic'
+              ? this.stock.setPicNama(nilai)
+              : this.stock.setPicNomor(nilai);
+            await this.bot.sendMessage(chatId, `Tersimpan. ${pesan}`);
+          } catch (err) {
+            await this.bot.sendMessage(chatId, `Gagal: ${err.message}\n\n`
+              + (cmd === '/stokpic'
+                ? 'Contoh: /stokpic Ibu Ani, Bpk. Budi\nKosongkan untuk membuang sapaan.'
+                : 'Contoh: /stokwa 6281234567890, 6289876543210\n'
+                  + 'Urut sesuai nama di /stokpic. "kosong" untuk melewati satu orang.'));
+          }
+          return true;
+        }
+
         const peta = {
           '/stokjam': ['hours', 'Contoh: /stokjam 8,12,16'],
-          '/stokambang': ['ambang', 'Contoh: /stokambang 1000'],
+          '/stokdoi': ['doiMax', 'Contoh: /stokdoi 7  (0 = matikan saringan DOI)'],
+          '/stokminavg': ['minAvg', 'Contoh: /stokminavg 1  (0 = tampilkan semua)'],
+          '/stokambang': ['ambang', 'Contoh: /stokambang 0  (0 = tanpa batas jumlah)'],
           '/stoktop': ['top', 'Contoh: /stoktop 20'],
           '/stokhari': ['salesDays', 'Contoh: /stokhari 90'],
           '/stokmode': ['avgMode', 'Pilihan: winsor (bawaan), full, normal, median'],

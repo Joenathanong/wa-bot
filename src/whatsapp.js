@@ -407,7 +407,9 @@ class WhatsAppService extends EventEmitter {
         logger.error('  Daftar versi: https://github.com/wppconnect-team/wa-version/tree/main/html');
         logger.error('');
       }
-      this.emit('stuck', this.stuckCount);
+      // Tahapnya ikut dikirim: 'qr' dan 'authenticated' adalah dua
+      // masalah yang sama sekali berbeda dengan dua penanganan berbeda.
+      this.emit('stuck', this.stuckCount, this.state);
       this.recover('macet sebelum ready').catch(() => { /* sudah dicatat */ });
     }, this.readyTimeoutMs);
     if (this._readyTimer.unref) this._readyTimer.unref();

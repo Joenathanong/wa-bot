@@ -123,12 +123,26 @@ async function main() {
       'QR baru dipindai. Buka terminal/log aplikasi, scan QR di sana dengan HP.'
     );
   });
-  wa.on('stuck', (n) => {
-    tg.notifyAdmins(
-      `WhatsApp macet di tahap login (percobaan ke-${n}) dan tidak pernah siap. ` +
-      'Koneksi dibangun ulang otomatis.' +
-      (n >= 2 ? ' Bila terus berulang, setel WA_WEB_VERSION di .env - lihat README bab 13.' : '')
-    );
+  wa.on('stuck', (n, tahap) => {
+    // Dua tahap yang sangat berbeda, dua penanganan yang berbeda pula.
+    // Pesan lama hanya menulis "tahap login" sehingga tidak mungkin
+    // dibedakan - dan salah satunya tidak akan pernah selesai sendiri.
+    let sebab;
+    if (tahap === 'qr') {
+      sebab = 'Aplikasi berhenti di tahap QR: TIDAK ADA yang memindai QR-nya, '
+        + 'jadi ini tidak akan pernah selesai sendiri. QR sudah dikirim ke chat ini - '
+        + 'buka WhatsApp di HP > Perangkat Tertaut > Tautkan Perangkat, lalu pindai. '
+        + 'QR kedaluwarsa cepat; kalau sudah pudar, tunggu QR berikutnya.';
+    } else if (tahap === 'authenticated') {
+      sebab = 'Sesi sudah sah tetapi halaman WhatsApp Web tidak pernah selesai dimuat. '
+        + 'Ini hampir selalu ketidakcocokan build WhatsApp Web dengan whatsapp-web.js. '
+        + 'Setel WA_WEB_VERSION di .env lalu jalankan ulang - lihat README bab 13.';
+    } else {
+      sebab = `Macet di tahap "${tahap}". Periksa log aplikasi; bila tertulis `
+        + '"The browser is already running", ada proses Chrome lama yang masih '
+        + 'memegang folder sesi - jalankan: taskkill /F /IM chrome.exe';
+    }
+    tg.notifyAdmins(`WhatsApp belum siap (percobaan ke-${n}, tahap "${tahap}").\n\n${sebab}`);
   });
   wa.on('recovering', (reason) => {
     tg.notifyAdmins(`Halaman WhatsApp Web bermasalah (${reason}). Koneksi dibangun ulang otomatis - tidak perlu scan QR. Pesan yang gagal akan disusulkan.`);

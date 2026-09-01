@@ -3,9 +3,11 @@
 const logger = require('./logger').scope('STOK');
 const OcsClient = require('./ocs-client');
 const {
-  renderStockReport, rentangPenjualan, daftarHari, deretHarian,
-  saringStok, susunBaris, kunciHari, jamLokal, angka,
+  renderStockReport, rentangPenjualan, daftarHari, daftarHariGabungan, deretHarian,
+  saringStok, saringDoi, susunBaris, kunciHari, jamLokal, angka, kriteria,
 } = require('./stock-report');
+const { normalisasiPic } = require('./lock-report');
+const { validateWhatsappNumber } = require('./render');
 
 /**
  * Penjadwal laporan "Stok Menipis".
@@ -30,6 +32,9 @@ const KUNCI = {
   avgMode: 'stock_avg_mode',
   salesDays: 'stock_sales_days',
   kategori: 'stock_category',
+  doiMax: 'stock_doi_max',
+  minAvg: 'stock_min_avg',
+  pic: 'stock_pic',
   lastFired: 'stock_last_fired',
 };
 
@@ -79,6 +84,8 @@ class StockScheduler {
     return {
       hours: StockScheduler.parseJam(this._setting(KUNCI.hours, d.hours.join(','))),
       ambang: Math.max(0, parseInt(this._setting(KUNCI.ambang, d.ambang), 10) || 0),
+      doiMax: Math.max(0, parseFloat(this._setting(KUNCI.doiMax, d.doiMax)) || 0),
+      minAvg: Math.max(0, parseFloat(this._setting(KUNCI.minAvg, d.minAvg)) || 0),
       top: Math.max(1, parseInt(this._setting(KUNCI.top, d.top), 10) || 20),
       kategori: String(this._setting(KUNCI.kategori, d.kategori)),
       avgMode: String(this._setting(KUNCI.avgMode, d.avgMode)).toLowerCase(),
@@ -130,10 +137,23 @@ class StockScheduler {
       this.db.setSetting(kunci, jam.join(','));
       return `Jam kirim: ${jam.map((j) => `${String(j).padStart(2, '0')}:00`).join(', ')}`;
     }
+    if (nama === 'doiMax' || nama === 'minAvg') {
+      const n = parseFloat(String(nilai).replace(',', '.'));
+      if (!Number.isFinite(n) || n < 0) throw new Error('isi dengan angka 0 atau lebih');
+      this.db.setSetting(KUNCI[nama], String(n));
+      return nama === 'doiMax'
+        ? (n > 0 ? `Tampilkan SKU dengan DOI di bawah ${n} hari` : 'Saringan DOI dimatikan')
+        : (n > 0 ? `Abaikan SKU yang lakunya di bawah ${n}/hari` : 'Tidak ada batas minimum penjualan');
+    }
     if (nama === 'ambang' || nama === 'top' || nama === 'salesDays') {
       const n = parseInt(String(nilai).replace(/[.,\s]/g, ''), 10);
-      if (!Number.isFinite(n) || n <= 0) throw new Error('isi dengan angka lebih dari 0');
+      const bolehNol = nama === 'ambang';
+      if (!Number.isFinite(n) || n < 0 || (!bolehNol && n === 0)) {
+        throw new Error(bolehNol ? 'isi dengan angka 0 atau lebih (0 = tanpa batas jumlah)'
+          : 'isi dengan angka lebih dari 0');
+      }
       this.db.setSetting(kunci, String(n));
+      if (nama === 'ambang' && n === 0) return 'Batas jumlah stok dimatikan - saringannya murni DOI.';
       return `${nama} = ${angka(n)}`;
     }
     if (nama === 'avgMode') {
@@ -156,6 +176,64 @@ class StockScheduler {
       return `Kategori: ${String(nilai).trim()}`;
     }
     throw new Error(`pengaturan "${nama}" tidak bisa diubah dari sini`);
+  }
+
+  /**
+   * PIC laporan stok - daftar datar, TIDAK dipecah per shop.
+   * Terpisah dari PIC lock stock, jadi boleh orang yang berbeda.
+   */
+  picList() {
+    try {
+      const mentah = this._setting(KUNCI.pic, '');
+      if (mentah) return normalisasiPic(JSON.parse(mentah));
+    } catch (err) {
+      logger.warn('Pengaturan PIC laporan stok rusak, diabaikan:', err.message);
+    }
+    return [];
+  }
+
+  static pisahKoma(teks) {
+    return String(teks || '').split(',').map((x) => x.trim()).filter(Boolean);
+  }
+
+  setPicNama(nama) {
+    const baru = StockScheduler.pisahKoma(nama);
+    if (baru.length === 0) {
+      this.db.setSetting(KUNCI.pic, '');
+      return 'PIC laporan stok dikosongkan - pesan dikirim tanpa sapaan.';
+    }
+    const lama = this.picList();
+    const hasil = baru.map((n, i) => ({ nama: n, nomor: (lama[i] && lama[i].nomor) || '' }));
+    this.db.setSetting(KUNCI.pic, JSON.stringify(hasil));
+    return `PIC laporan stok (${hasil.length} orang):\n`
+      + hasil.map((p, i) => `  ${i + 1}. ${p.nama}${p.nomor ? ` (@${p.nomor})` : ' - belum ada nomor'}`).join('\n');
+  }
+
+  setPicNomor(nomor) {
+    const daftar = this.picList();
+    if (daftar.length === 0) throw new Error('belum ada PIC. Isi namanya dulu dengan /stokpic');
+    const mentah = String(nomor || '').trim();
+    if (mentah === '' || /^(hapus|kosong|-)$/i.test(mentah)) {
+      const kosong = daftar.map((p) => ({ ...p, nomor: '' }));
+      this.db.setSetting(KUNCI.pic, JSON.stringify(kosong));
+      return 'Semua nomor PIC laporan stok dihapus - namanya tetap disapa, tanpa mention.';
+    }
+    const potongan = StockScheduler.pisahKoma(mentah);
+    if (potongan.length > daftar.length) {
+      throw new Error(`ada ${potongan.length} nomor tetapi hanya ${daftar.length} nama PIC. `
+        + 'Tambahkan namanya dulu dengan /stokpic');
+    }
+    const bersih = [];
+    for (const [i, n] of potongan.entries()) {
+      if (/^(kosong|-)$/i.test(n)) { bersih.push(''); continue; }
+      const cek = validateWhatsappNumber(n);
+      if (!cek.ok) throw new Error(`nomor ke-${i + 1} ("${n}"): ${cek.error}`);
+      bersih.push(cek.value);
+    }
+    const hasil = daftar.map((p, i) => ({ ...p, nomor: i < bersih.length ? bersih[i] : p.nomor }));
+    this.db.setSetting(KUNCI.pic, JSON.stringify(hasil));
+    return `PIC laporan stok:\n`
+      + hasil.map((p, i) => `  ${i + 1}. ${p.nama}${p.nomor ? ` (@${p.nomor})` : ' - belum ada nomor'}`).join('\n');
   }
 
   /* ---------------------------- penjadwal --------------------------- */
@@ -233,11 +311,11 @@ class StockScheduler {
     this.stats.runs += 1;
     try {
       const data = await this.ambilData();
-      const teks = this.susunPesan(data);
-      const groups = await this.kirim(teks);
+      const pesan = this.susunPesan(data);
+      const groups = await this.kirim(pesan);
       this.lastOkAt = Date.now();
       this.lastError = null;
-      return { status: 'sent', text: teks, groups, jumlah: data.baris.length };
+      return { status: 'sent', text: pesan.text, groups, jumlah: data.baris.length };
     } catch (err) {
       this.stats.failed += 1;
       this.lastError = err.message;
@@ -258,7 +336,7 @@ class StockScheduler {
     const o = { ...this.opsi(), ...opsiTambahan };
     const now = opsiTambahan.now || new Date();
     const rentang = rentangPenjualan(now, o.tzOffsetMinutes, o.salesDays);
-    const hariList = daftarHari(rentang.from, rentang.to, o.tzOffsetMinutes);
+    let hariList = daftarHari(rentang.from, rentang.to, o.tzOffsetMinutes);
 
     const errors = [];
 
@@ -280,18 +358,36 @@ class StockScheduler {
       });
       penjualan = deretHarian(hasil.baris, o.tzOffsetMinutes);
       errors.push(...hasil.errors);
-      this._cache = { kunci: kunciCache, penjualan, errors: hasil.errors };
-      logger.info(`Penjualan ${o.salesDays} hari: ${hasil.baris.length} baris, ${penjualan.size} SKU.`);
+      // Pembagi hanya memuat hari yang datanya benar-benar sampai.
+      const hariNyata = daftarHariGabungan(hasil.berhasil || [], o.tzOffsetMinutes);
+      this._cache = {
+        kunci: kunciCache, penjualan, errors: hasil.errors, hariNyata,
+      };
+      logger.info(`Penjualan: ${hasil.baris.length} baris, ${penjualan.size} SKU, `
+        + `${hariNyata.length} dari ${hariList.length} hari berhasil ditarik.`);
+    }
+    const hariNyata = this._cache.hariNyata;
+    if (hariNyata && hariNyata.length > 0 && hariNyata.length < hariList.length) {
+      logger.warn(
+        `Hanya ${hariNyata.length} dari ${hariList.length} hari yang berhasil ditarik. `
+        + 'Rata-rata dihitung memakai hari yang ada saja agar tidak terlalu rendah.'
+      );
+      hariList = hariNyata;
     }
 
-    const baris = susunBaris(stok, penjualan, hariList, {
+    const semua = susunBaris(stok, penjualan, hariList, {
       mode: o.avgMode, persentil: o.persentil, paydayMulai: o.paydayMulai,
     });
+    const baris = saringDoi(semua, { doiMax: o.doiMax, minAvg: o.minAvg });
 
-    logger.info(`Stok di bawah ${o.ambang}: ${baris.length} SKU (kategori ${o.kategori}).`);
-    return { baris, rentang, hariList, errors, opsi: o };
+    logger.info(
+      `Kandidat ${semua.length} SKU (kategori ${o.kategori}), `
+      + `${baris.length} memenuhi kriteria: ${kriteria(o, o.ambang)}.`
+    );
+    return { baris, semua, rentang: { ...rentang, hari: hariList.length }, hariList, errors, opsi: o };
   }
 
+  /** @returns {{text: string, mentions: string[]}} */
   susunPesan(data) {
     const o = data.opsi || this.opsi();
     return renderStockReport(data, {
@@ -300,11 +396,15 @@ class StockScheduler {
       tzLabel: o.tzLabel,
       top: o.top,
       ambang: o.ambang,
+      doiMax: o.doiMax,
+      minAvg: o.minAvg,
       kategori: o.kategori,
       mode: o.avgMode,
       persentil: o.persentil,
       detail: o.detail,
       judul: o.judul,
+      pic: this.picList(),
+      denganMention: true,
     });
   }
 
@@ -327,7 +427,9 @@ class StockScheduler {
     return hasil;
   }
 
-  async kirim(teks) {
+  async kirim(pesan) {
+    const teks = typeof pesan === 'string' ? pesan : pesan.text;
+    const mentions = typeof pesan === 'string' ? [] : (pesan.mentions || []);
     const groups = this.targetGroups();
     if (groups.length === 0) {
       if (this._groupTidakDikenal.length > 0) {
@@ -342,7 +444,7 @@ class StockScheduler {
     const gagal = [];
     for (const group of groups) {
       try {
-        await this.queue.enqueue(() => this.wa.sendText(group.id, teks, []), `laporan stok -> ${group.name}`);
+        await this.queue.enqueue(() => this.wa.sendText(group.id, teks, mentions), `laporan stok -> ${group.name}`);
         terkirim += 1;
       } catch (err) {
         gagal.push(`${group.name}: ${err.message}`);
@@ -364,7 +466,11 @@ class StockScheduler {
     B.push(o.hours.length > 0
       ? `Jam kirim: ${o.hours.map((j) => `${String(j).padStart(2, '0')}:00`).join(', ')} ${o.tzLabel}`
       : 'Jam kirim: belum disetel');
-    B.push(`Ambang stok: < ${angka(o.ambang)} | Kategori: ${o.kategori}`);
+    B.push(`Kriteria: ${kriteria(o, o.ambang)}`);
+    B.push(`Kategori: ${o.kategori}`);
+    const pic = this.picList();
+    B.push(`PIC: ${pic.length === 0 ? '(belum diisi - pesan tanpa sapaan)'
+      : pic.map((p) => `${p.nama}${p.nomor ? ` (@${p.nomor})` : ' [tanpa nomor]'}`).join(', ')}`);
     B.push(`Rata-rata: ${o.salesDays} hari, mode ${o.avgMode}`);
     B.push(`Tampilkan: ${o.top} SKU teratas`);
     B.push(`Group tujuan: ${o.groupIds.length === 0 ? 'semua group aktif' : o.groupIds.join(', ')}`);

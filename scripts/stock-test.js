@@ -5,6 +5,7 @@
  *
  *   npm run stock:test                 - ambil data lalu cetak pesannya
  *   npm run stock:test -- --banding    - bandingkan keempat mode rata-rata
+ *   npm run stock:test -- --jendela    - bandingkan jendela 30 / 60 / 90 hari
  *   npm run stock:test -- --sku ACNE-PACKAGE   - bedah satu SKU hari per hari
  *
  * Jalankan ini dulu setiap kali mengubah ambang, jendela hari, atau mode.
@@ -17,6 +18,7 @@ const R = require(path.join(__dirname, '..', 'src', 'stock-report'));
 
 const argv = process.argv.slice(2);
 const BANDING = argv.includes('--banding');
+const JENDELA = argv.includes('--jendela');
 const iSku = argv.indexOf('--sku');
 const SKU = iSku >= 0 ? argv[iSku + 1] : null;
 
@@ -32,7 +34,7 @@ async function main() {
   const off = c.tzOffsetMinutes;
 
   garis('UJI LAPORAN STOK MENIPIS');
-  console.log('Ambang      : stok <', o.ambang);
+  console.log('Kriteria    :', R.kriteria(o, o.ambang));
   console.log('Kategori    :', o.kategori, '| hanya aktif:', o.hanyaAktif, '| area:', o.area || '(semua)');
   console.log('Jendela     :', o.salesDays, 'hari, dipecah per', o.chunkDays, 'hari');
   console.log('Mode        :', o.avgMode, `(P${o.persentil})`);
@@ -136,17 +138,83 @@ async function main() {
     console.log('"normal" jauh di bawah "winsor" berarti penjualannya memang bertumpu di payday.');
   }
 
+  /* -------------------- banding panjang jendela ------------------ */
+  if (JENDELA) {
+    garis('5b. PERBANDINGAN PANJANG JENDELA (30 / 60 / 90 HARI)');
+    console.log('Menarik jendela yang lebih panjang. Ini butuh beberapa menit.\n');
+
+    const uji = [30, 60, 90];
+    const ringkas = [];
+    for (const n of uji) {
+      const r = R.rentangPenjualan(new Date(), off, n);
+      const t = Date.now();
+      const h = await client.fetchOrderPerSkuRange({
+        from: r.from, to: r.to, chunkDays: o.chunkDays,
+        platform: o.platform, shop: o.shop, area: o.area || 'All',
+      });
+      const hariNyata = R.daftarHariGabungan(h.berhasil || [], off);
+      const jual = R.deretHarian(h.baris, off);
+      const b = R.saringDoi(
+        R.susunBaris(stok, jual, hariNyata, { mode: o.avgMode, persentil: o.persentil }),
+        { doiMax: o.doiMax, minAvg: o.minAvg }
+      );
+      ringkas.push({ n, hari: hariNyata.length, gagal: h.errors.length, baris: b, detik: Math.round((Date.now() - t) / 1000) });
+      console.log(`  ${String(n).padStart(2)} hari: ${hariNyata.length} hari terpakai, `
+        + `${h.errors.length} potongan gagal, ${b.length} SKU kena kriteria, ${Math.round((Date.now() - t) / 1000)} detik`);
+    }
+
+    const dasar = ringkas[0];
+    console.log('\nSKU yang HANYA muncul di salah satu jendela:');
+    for (const r of ringkas.slice(1)) {
+      const a = new Set(dasar.baris.map((x) => x.sku));
+      const b = new Set(r.baris.map((x) => x.sku));
+      const hanyaPendek = [...a].filter((x) => !b.has(x));
+      const hanyaPanjang = [...b].filter((x) => !a.has(x));
+      console.log(`  30 vs ${r.n} hari -> hanya di 30: ${hanyaPendek.length}, hanya di ${r.n}: ${hanyaPanjang.length}`);
+      if (hanyaPendek.length > 0) console.log(`     contoh hanya di 30 : ${hanyaPendek.slice(0, 5).join(', ')}`);
+      if (hanyaPanjang.length > 0) console.log(`     contoh hanya di ${r.n}: ${hanyaPanjang.slice(0, 5).join(', ')}`);
+    }
+
+    console.log('\nRata-rata harian 10 SKU teratas di tiap jendela:');
+    const teratas = dasar.baris.slice(0, 10).map((x) => x.sku);
+    console.log('  ' + 'SKU'.padEnd(38) + uji.map((n) => `${n}h`.padStart(10)).join(''));
+    for (const sku of teratas) {
+      const nilai = ringkas.map((r) => {
+        const f = r.baris.find((x) => x.sku === sku);
+        return (f ? f.rata.toFixed(1) : '-').padStart(10);
+      }).join('');
+      console.log('  ' + sku.slice(0, 37).padEnd(38) + nilai);
+    }
+    console.log('\nBaca: kalau angka 30 hari jauh di atas 90 hari, permintaannya sedang NAIK');
+    console.log('dan jendela panjang akan membuat peringatan datang terlambat. Sebaliknya bila');
+    console.log('angkanya turun, jendela panjang membuat peringatan terlalu sering.');
+  }
+
   /* ------------------------ pesan jadi ------------------------- */
   garis('6. PESAN YANG AKAN DIKIRIM KE WHATSAPP');
-  const barisAkhir = R.susunBaris(stok, penjualan, hariList, {
+  const semuaBaris = R.susunBaris(stok, penjualan, hariList, {
     mode: o.avgMode, persentil: o.persentil, paydayMulai: o.paydayMulai,
   });
+  const barisAkhir = R.saringDoi(semuaBaris, { doiMax: o.doiMax, minAvg: o.minAvg });
+  console.log(`${semuaBaris.length} kandidat -> ${barisAkhir.length} memenuhi kriteria.`);
+  const nyaris = semuaBaris
+    .filter((b) => b.hariCukup !== null && !barisAkhir.includes(b))
+    .sort((a, b) => a.hariCukup - b.hariCukup)
+    .slice(0, 5);
+  if (nyaris.length > 0) {
+    console.log('\nLima SKU terdekat yang BELUM masuk kriteria:');
+    for (const b of nyaris) {
+      console.log(`  ${b.sku.slice(0, 40).padEnd(42)} stok ${String(b.qty).padStart(7)}`
+        + `  avg ${b.rata.toFixed(1).padStart(8)}  ${b.hariCukup.toFixed(1)} hari`);
+    }
+  }
   const teks = R.renderStockReport(
     { baris: barisAkhir, rentang, errors: hasil.errors },
     {
       now: new Date(), tzOffsetMinutes: off, tzLabel: c.tzLabel,
-      top: o.top, ambang: o.ambang, kategori: o.kategori,
-      mode: o.avgMode, persentil: o.persentil, detail: o.detail, judul: o.judul,
+      top: o.top, ambang: o.ambang, doiMax: o.doiMax, minAvg: o.minAvg,
+      kategori: o.kategori, mode: o.avgMode, persentil: o.persentil,
+      detail: o.detail, judul: o.judul,
     }
   );
   console.log('');

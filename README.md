@@ -1555,18 +1555,52 @@ Menarik dua halaman OCS lalu menggabungkannya menjadi satu daftar
 Keduanya **hanya dibaca**. Tidak ada satu pun permintaan yang mengubah
 data di OCS, dan ada uji otomatis yang menjaganya tetap begitu.
 
-### 22.1 Penyaringan
+### 22.1 Penyaringan - DOI, bukan jumlah stok
 
-Dikerjakan di sisi OCS lewat OData, jadi yang melintasi jaringan hanya
-baris yang memang dibutuhkan:
+Kriteria utamanya **DOI** (Days of Inventory):
 
 ```
-IsActive eq true and Category eq 'Sku' and AvailableQty lt 1000
+DOI = Available Qty / rata-rata penjualan harian
 ```
 
-- **Status aktif saja** - `STOCK_ACTIVE_ONLY`
-- **Kategori Sku saja** - `STOCK_CATEGORY`
-- **Di bawah 1.000** - `STOCK_THRESHOLD`, atau `/stokambang 1000`
+Bawaannya menampilkan SKU dengan **DOI di bawah 7 hari** (`/stokdoi 7`).
+
+Kenapa bukan ambang jumlah seperti sebelumnya? Dari 392 SKU aktif
+kategori Sku di data Anda:
+
+| | |
+|---|---|
+| Di bawah 1.000 (kriteria lama) | 233 |
+| Di atas 1.000 (tidak pernah terlihat) | 159 |
+
+Ambang jumlah salah di dua arah sekaligus. **233 SKU terlalu banyak** -
+laporan hanya memuat 20, dan sebagian besar sisanya barang lambat yang
+stok 300-nya cukup untuk berbulan-bulan. Sementara **159 SKU di atas
+1.000 tidak pernah muncul**, padahal SKU yang laku 500/hari dengan stok
+2.000 akan habis dalam 4 hari - justru yang paling mendesak.
+
+DOI menjawab pertanyaan yang sebenarnya: *kapan habis*.
+
+| Variabel | Bawaan | Keterangan |
+|---|---|---|
+| `STOCK_DOI_MAX` | `7` | Tampilkan SKU dengan DOI di bawah sekian hari. `0` = matikan |
+| `STOCK_THRESHOLD` | `0` | Batas jumlah stok. `0` = tanpa batas. Bisa dihidupkan lagi kapan saja |
+| `STOCK_MIN_AVG` | `0` | Abaikan SKU yang rata-ratanya di bawah ini. `0` = tampilkan semua |
+| `STOCK_SALES_DAYS` | `30` | Jendela penjualan. Pakai kelipatan ~30 (30/60/90) |
+| `STOCK_CHUNK_DAYS` | `15` | Besar tiap permintaan ke OCS. Turunkan bila masih 504 |
+| `STOCK_CATEGORY` | `Sku` | Kategori di View V2 |
+| `STOCK_ACTIVE_ONLY` | `true` | Hanya status aktif |
+
+Dua hal yang perlu diketahui tentang perilakunya:
+
+- **SKU tanpa penjualan tidak pernah muncul.** DOI-nya tak terhingga -
+  stoknya memang rendah, tetapi tidak ada yang membelinya sehingga tidak
+  akan habis. Menampilkannya hanya jadi alarm palsu.
+- **SKU yang lakunya sangat jarang bisa memenuhi kriteria.** Barang yang
+  laku 5 pcs dalam 90 hari lalu stoknya habis akan dapat DOI 0 dan naik
+  ke urutan teratas, padahal dampaknya kecil. `STOCK_MIN_AVG=1`
+  (`/stokminavg 1`) menyingkirkannya. Bawaannya mati supaya tidak ada
+  data yang disembunyikan tanpa Anda minta.
 
 ### 22.2 Avg Daily Sales - kenapa payday TIDAK dibuang
 
@@ -1603,15 +1637,47 @@ Mode lain tetap tersedia untuk pembanding lewat `/stokmode`:
 Angka `normal` dan `puncak` selalu ikut ditampilkan di pesan supaya
 perilaku tiap SKU tetap kelihatan.
 
-**Jendela hari.** Bawaan 90 hari **penuh** terakhir, berakhir kemarin.
-Hari ini sengaja tidak ikut karena masih berjalan - memasukkannya akan
-menarik rata-rata ke bawah setiap pagi.
+**Jendela hari: 30 hari, bukan 90.** Berakhir kemarin; hari ini tidak
+ikut karena masih berjalan dan akan menarik rata-rata ke bawah tiap pagi.
 
-**Pemecahan permintaan.** OCS menjawab `504 Gateway Timeout` bila diminta
-90 hari sekaligus, sedangkan 30 hari aman (sekitar 2 MB per potong).
-Permintaan karena itu dipecah sebesar `STOCK_CHUNK_DAYS`, lalu hasilnya
-di-cache per jendela tanggal - tiga laporan dalam satu hari hanya menarik
-data berat itu **sekali**.
+Tiga alasannya:
+
+1. **Cocokkan jendela dengan horizon keputusannya.** Angka ini menjawab
+   "habis dalam 7 hari ke depan?" - pertanyaan jangka pendek. Permintaan
+   minggu lalu jauh lebih menentukan daripada permintaan tiga bulan lalu.
+   Kalau penjualan sebuah SKU naik dua kali lipat sebulan yang lalu,
+   rata-rata 90 hari baru menunjukkan sekitar **1,3x** - bukan 2x -
+   sehingga konsumsinya diremehkan sepertiga dan peringatan datang
+   terlambat. Untuk peringatan stok habis, terlambat adalah kegagalan
+   yang justru sedang dicegah.
+2. **Panjangnya harus kelipatan ~30 hari.** Permintaan e-commerce
+   Indonesia berayun mengikuti siklus bulanan: puncak gajian (25-31) dan
+   lembah tanggal tua (20-24). Jendela 30, 60, atau 90 hari memuat siklus
+   itu secara utuh sehingga seimbang. Jendela 45 hari **tidak** - hasilnya
+   berubah-ubah tergantung tanggal berapa laporan dijalankan.
+3. **Lonjakan sudah ditangani terpisah.** Alasan klasik memakai jendela
+   panjang adalah mengencerkan lonjakan; di sini winsorize sudah
+   melakukannya tanpa perlu mengorbankan kepekaan terhadap tren.
+
+Yang dikorbankan: SKU yang lakunya bergelombang (20 pcs sekali sebulan)
+menjadi lebih berisik dalam 30 hari. Naikkan ke `60` atau `90` lewat
+`/stokhari` bila itu terasa mengganggu, dan bandingkan sendiri dengan
+`npm run stock:test -- --jendela`.
+
+**Pemecahan permintaan.** OCS menjawab `504 Gateway Timeout` untuk
+rentang 90 hari, dan **kadang gagal juga untuk 30 hari** (teramati
+langsung: Agustus berhasil, Juli gagal pada rentang 30 hari yang sama).
+Karena itu `STOCK_CHUNK_DAYS` bawaannya **15 hari**. Hasilnya di-cache
+per jendela tanggal - beberapa laporan dalam satu hari hanya menarik data
+berat itu **sekali**.
+
+**Potongan yang gagal dikeluarkan dari pembagi.** Kalau satu potongan
+gagal, penjualannya hilang - dan bila harinya tetap ikut dihitung,
+rata-rata jatuh sebanding dengan bagian yang hilang. Rata-rata 90 hari
+yang kehilangan satu potongan 30 hari akan turun sepertiga, tepat pada
+saat data sedang bermasalah, tanpa ada yang menyadarinya. Aplikasi
+karena itu hanya menghitung hari yang datanya benar-benar sampai, dan
+menulis peringatan di log bila jumlahnya kurang dari yang diminta.
 
 ### 22.3 Jam kirim
 
@@ -1635,7 +1701,11 @@ mengedit berkas maupun me-restart service.
 | `/stokstatus` | Seluruh pengaturan + waktu keberhasilan terakhir |
 | `/stokon`, `/stokoff` | Nyalakan / matikan pengiriman terjadwal |
 | `/stokjam 8,12,16` | Jam kirim, waktu lokal |
-| `/stokambang 1000` | Batas stok yang dianggap menipis |
+| `/stokdoi 7` | Tampilkan SKU yang stoknya cukup kurang dari sekian hari |
+| `/stokambang 0` | Batas jumlah stok. `0` = tanpa batas |
+| `/stokminavg 0` | Abaikan SKU yang lakunya di bawah sekian/hari |
+| `/stokpic <Nama>` | PIC laporan stok. Boleh lebih dari satu, pisah koma |
+| `/stokwa <Nomor>` | Nomor PIC untuk mention, urut sesuai namanya |
 | `/stoktop 20` | Jumlah SKU yang ditampilkan |
 | `/stokhari 90` | Jendela hari untuk rata-rata penjualan |
 | `/stokmode winsor` | `winsor`, `full`, `normal`, atau `median` |
@@ -1666,25 +1736,55 @@ Bacanya: `full` jauh di atas `winsor` berarti SKU itu punya lonjakan
 ekstrem; `normal` jauh di bawah `winsor` berarti penjualannya memang
 bertumpu di payday.
 
+`--jendela` menarik jendela 30, 60, dan 90 hari lalu menjajarkannya:
+berapa SKU yang kena kriteria di masing-masing, SKU mana yang hanya
+muncul di salah satunya, dan rata-rata 10 SKU teratas di ketiganya.
+Kalau angka 30 hari jauh di atas 90 hari berarti permintaan sedang naik
+dan jendela panjang akan membuat peringatan terlambat.
+
 `--sku` membedah satu SKU hari per hari, menandai hari puncak dengan `*`,
 lalu menghitung keempat mode beserta batas P95-nya.
 
-### 22.6 Isi pesan
+### 22.6 Group tujuan & PIC
+
+Laporan stok punya **setelan sendiri**, terpisah penuh dari lock stock
+maupun forwarder Telegram:
+
+| | Laporan stok | Lock stock |
+|---|---|---|
+| Group tujuan | `/stokgroup` (`stock_groups`) | `/lockgroup` (`lock_groups`) |
+| PIC | `/stokpic`, `/stokwa` (`stock_pic`) | `/lockpic`, `/lockwa` (`lock_pic`) |
+
+PIC laporan stok berupa **daftar datar** - tidak dipecah per Shop -
+karena laporan ini memang tidak berhubungan dengan Shop. Boleh lebih
+dari satu orang, dipisah koma, dan nomornya dipasangkan menurut urutan:
 
 ```
+/stokpic Ibu Ani, Bpk. Budi
+/stokwa  6281234567890, 6289876543210
+```
+
+Aturan komanya sama persis dengan `/lockpic` (lihat bab 23.4). Tanpa PIC,
+laporan tetap terkirim - hanya tanpa sapaan dan tanpa mention.
+
+### 22.7 Isi pesan
+
+```
+*Dear Ibu Ani @6281234567890 & Bpk. Budi @6289876543210*
+
 *STOK MENIPIS*
-Jumat, 28 Agu 2026 - 08:00 WIB
-Stok < 1.000 | Kategori Sku | Status aktif
+Selasa, 1 Sep 2026 - 08:00 WIB
+Kriteria: DOI < 7 hari
+Kategori Sku | Status aktif
 Rata-rata 90 hari (semua hari, lonjakan dibatasi P95)
 
-*215 SKU di bawah ambang* - 20 paling mendesak:
+*12 SKU perlu perhatian* - 12 paling mendesak:
 
-1. HANASUI-TONE-UP-SERUM
-   Stok *840* | Avg *62*/hari -> 13 hari
-   normal 48 - puncak 210
-2. ...
-
-_...dan 195 SKU lain di bawah ambang._
+1. NCO-EDP-ONYX
+   Stok *900* | Avg *300*/hari -> 3,0 hari
+   normal 280 - puncak 410
+2. HANASUI-TONE-UP-SERUM
+   Stok *2.726* | Avg *500*/hari -> 5,5 hari
 ```
 
 Urutannya **paling mendesak dulu** - sisa hari paling sedikit di atas.
@@ -1692,7 +1792,7 @@ SKU yang stoknya rendah tetapi tidak ada penjualannya sama sekali ditaruh
 paling belakang; stoknya memang rendah, tetapi tidak ada yang membelinya.
 Pesan dipotong otomatis agar tidak pernah melewati batas WhatsApp.
 
-### 22.7 Kalau gagal
+### 22.8 Kalau gagal
 
 | Gejala | Sebab yang paling sering |
 |---|---|
@@ -1701,6 +1801,8 @@ Pesan dipotong otomatis agar tidak pernah melewati batas WhatsApp.
 | `belum ada WhatsApp Group aktif` | `/stokgroup` kosong dan tidak ada group aktif |
 | Laporan tidak pernah datang | `/stokstatus` - cek "Jam kirim" sudah disetel dan statusnya AKTIF |
 | Semua Avg 0 | Jendela hari jatuh di periode tanpa data. Cek `npm run stock:test` bagian 3 |
+| Laporan kosong terus | DOI 7 hari mungkin terlalu ketat. Naikkan dengan `/stokdoi 14`, atau lihat "Lima SKU terdekat" di `npm run stock:test` |
+| Laporan penuh barang tidak penting | Nyalakan `/stokminavg 1` untuk menyingkirkan SKU yang lakunya sangat jarang |
 
 ---
 

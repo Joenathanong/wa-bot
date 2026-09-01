@@ -34,6 +34,8 @@
  * =======================================================================
  */
 
+const { sapaanPic } = require('./lock-report');
+
 const HARI_MS = 24 * 3600 * 1000;
 
 /* ------------------------------ tanggal -------------------------------- */
@@ -68,6 +70,19 @@ function rentangPenjualan(now, offsetMinutes, hari) {
   const akhir = awalHariLokal(now, offsetMinutes);         // 00:00 hari ini
   const awal = new Date(akhir.getTime() - n * HARI_MS);
   return { from: awal.toISOString(), to: akhir.toISOString(), hari: n };
+}
+
+/**
+ * Gabungan daftar hari dari BEBERAPA rentang, tanpa duplikat.
+ * Dipakai supaya pembagi rata-rata hanya memuat hari yang datanya
+ * benar-benar berhasil ditarik.
+ */
+function daftarHariGabungan(rentang, offsetMinutes) {
+  const set = new Set();
+  for (const r of rentang || []) {
+    for (const h of daftarHari(r.from, r.to, offsetMinutes)) set.add(h);
+  }
+  return [...set].sort();
 }
 
 /** Daftar kunci hari "YYYY-MM-DD" di dalam jendela. */
@@ -210,7 +225,35 @@ function saringStok(stok, opsi = {}) {
     if (hanyaAktif && s.IsActive !== true) return false;
     if (kategori && String(s.Category || '').toLowerCase() !== kategori) return false;
     if (area && String(s.AreaId || '').toLowerCase() !== area) return false;
+    // ambang 0 (atau kosong) berarti TANPA batas jumlah - saringan
+    // sesungguhnya dikerjakan oleh DOI, bukan oleh angka stok.
+    if (!ambang) return true;
     return Number(s.AvailableQty) < ambang;
+  });
+}
+
+/**
+ * Saring berdasarkan DOI (Days of Inventory) = stok / rata-rata harian.
+ *
+ * Ini kriteria yang menjawab pertanyaan sebenarnya - "kapan habis" -
+ * dan bukan sekadar "stoknya sedikit". SKU yang laku 500/hari dengan
+ * stok 2.000 akan habis 4 hari lagi; ambang jumlah tidak pernah bisa
+ * menangkapnya, DOI bisa.
+ *
+ * SKU tanpa penjualan (hariCukup null) TIDAK ikut: stoknya memang
+ * rendah, tetapi tidak ada yang membelinya sehingga tidak akan habis.
+ *
+ * @param {Array} baris hasil susunBaris
+ * @param {{doiMax?: number, minAvg?: number}} opsi
+ */
+function saringDoi(baris, opsi = {}) {
+  const doiMax = Number(opsi.doiMax) || 0;
+  const minAvg = Number(opsi.minAvg) || 0;
+  return (baris || []).filter((b) => {
+    if (minAvg > 0 && b.rata < minAvg) return false;
+    if (doiMax <= 0) return true;
+    if (b.hariCukup === null) return false;
+    return b.hariCukup < doiMax;
   });
 }
 
@@ -275,6 +318,23 @@ function hari(n) {
   return `${Math.round(n)} hari`;
 }
 
+/** Angka tanpa nol di belakang koma: 2 -> "2", 1.5 -> "1,5". */
+function rapi(n) {
+  const v = Number(n) || 0;
+  return (Number.isInteger(v) ? String(v) : v.toFixed(1)).replace('.', ',');
+}
+
+/** Kalimat kriteria yang sedang berlaku, apa adanya. */
+function kriteria(opsi, ambang) {
+  const bagian = [];
+  const doi = Number(opsi.doiMax) || 0;
+  if (doi > 0) bagian.push(`DOI < ${rapi(doi)} hari`);
+  if (ambang > 0) bagian.push(`stok < ${angka(ambang)}`);
+  // Dipakai apa adanya: "min 2/hari", bukan "min 2,0/hari".
+  if (Number(opsi.minAvg) > 0) bagian.push(`min ${rapi(opsi.minAvg)}/hari`);
+  return bagian.length > 0 ? bagian.join(' | ') : 'seluruh SKU';
+}
+
 function namaMode(mode, p) {
   const m = String(mode || 'winsor').toLowerCase();
   if (m === 'full') return 'semua hari, tanpa batas';
@@ -300,18 +360,25 @@ function renderStockReport(data, opsi = {}) {
   const semua = data.baris || [];
   const L = [];
 
+  const { teks: sapaan, jids: mentions } = sapaanPic(opsi.pic);
+  if (sapaan) {
+    L.push(`*Dear ${sapaan}*`);
+    L.push('');
+  }
+
   L.push(`*${opsi.judul || 'STOK MENIPIS'}*`);
   L.push(`${tanggalLokal(now, off)} - ${jamLokal(now, off, label)}`);
-  L.push(`Stok < ${angka(ambang)} | Kategori ${opsi.kategori || 'Sku'} | Status aktif`);
+  L.push(`Kriteria: ${kriteria(opsi, ambang)}`);
+  L.push(`Kategori ${opsi.kategori || 'Sku'} | Status aktif`);
   L.push(`Rata-rata ${data.rentang ? data.rentang.hari : '-'} hari (${namaMode(opsi.mode, opsi.persentil || 95)})`);
   L.push('');
 
   if (semua.length === 0) {
-    L.push('Tidak ada SKU di bawah ambang. Stok aman.');
-    return L.join('\n');
+    L.push('Tidak ada SKU yang memenuhi kriteria. Stok aman.');
+    return jadikan(L, mentions, opsi);
   }
 
-  L.push(`*${semua.length} SKU di bawah ambang* - ${Math.min(top, semua.length)} paling mendesak:`);
+  L.push(`*${semua.length} SKU perlu perhatian* - ${Math.min(top, semua.length)} paling mendesak:`);
   L.push('');
 
   let ditampilkan = 0;
@@ -331,7 +398,7 @@ function renderStockReport(data, opsi = {}) {
   const sisa = semua.length - ditampilkan;
   if (sisa > 0) {
     L.push('');
-    L.push(`_...dan ${angka(sisa)} SKU lain di bawah ambang._`);
+    L.push(`_...dan ${angka(sisa)} SKU lain yang memenuhi kriteria._`);
   }
 
   L.push('');
@@ -343,16 +410,29 @@ function renderStockReport(data, opsi = {}) {
     L.push(`_Sebagian data gagal diambil: ${data.errors.join(' | ')}_`);
   }
 
-  return L.join('\n');
+  return jadikan(L, mentions, opsi);
+}
+
+/**
+ * renderStockReport dipakai di dua tempat dengan kebutuhan berbeda:
+ * skrip uji hanya ingin teksnya, penjadwal butuh daftar mention juga.
+ * Bentuk lama (string) dipertahankan supaya pemanggil lama tidak rusak.
+ */
+function jadikan(baris, mentions, opsi) {
+  const teks = baris.join('\n');
+  return opsi.denganMention ? { text: teks, mentions } : teks;
 }
 
 module.exports = {
   renderStockReport,
   rentangPenjualan,
   daftarHari,
+  daftarHariGabungan,
   deretHarian,
   saringStok,
+  saringDoi,
   susunBaris,
+  kriteria,
   hitungRataHarian,
   persentil,
   median,
