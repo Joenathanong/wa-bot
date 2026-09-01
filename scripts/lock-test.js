@@ -76,30 +76,61 @@ async function main() {
     console.log('\nAman - tidak ada yang perlu diperingatkan saat ini.');
   }
 
-  garis('3. MASTER SKU RACK (pencarian shop)');
+  garis('3. MASTER SKU RACK + MASTER BUNDLE (pencarian shop)');
   const rack = await client.fetchSkuRack();
   const peta = L.petaShop(rack);
+  let daftarBundle = [];
+  let petaB = new Map();
+  try {
+    daftarBundle = await client.fetchBundle();
+    petaB = L.petaBundle(daftarBundle);
+  } catch (err) {
+    console.log('! Master Bundle gagal diambil:', err.message);
+  }
   const perShop = {};
   for (const r of rack) perShop[r.ShopCode] = (perShop[r.ShopCode] || 0) + 1;
   console.log(`${rack.length} baris, ${peta.size} SellerSku unik.`);
   console.log('Baris per shop:', JSON.stringify(perShop));
   const ganda = [...peta.entries()].filter(([, v]) => v.length > 1);
   console.log(`SKU yang terdaftar di lebih dari satu shop: ${ganda.length}`);
+  console.log(`Master Bundle: ${daftarBundle.length} bundle, ${petaB.size} punya komponen.`);
   if (RACK && ganda.length > 0) {
     for (const [sku, shops] of ganda) console.log(`  ${sku.padEnd(44)} ${shops.join(' + ')}`);
   }
+  if (RACK && petaB.size > 0) {
+    let lintas = 0;
+    let takTerpetakan = 0;
+    for (const [, komponen] of petaB) {
+      const sh = new Set();
+      for (const k of komponen) for (const x of peta.get(k) || []) sh.add(x);
+      if (sh.size === 0) takTerpetakan += 1;
+      else if (sh.size > 1) lintas += 1;
+    }
+    console.log(`  Bundle yang komponennya menunjuk >1 shop : ${lintas}`);
+    console.log(`  Bundle yang komponennya tidak ada di rack: ${takTerpetakan}`);
+  }
 
   garis('4. PENCARIAN SHOP UNTUK TIAP SKU TER-LOCK');
+  const NAMA_ASAL = {
+    master: 'Master Sku Rack',
+    bundle: 'komponen bundle -> Sku Rack',
+    kode: 'TEBAKAN dari kode SKU',
+  };
   for (const s of terkunci) {
-    const dariMaster = peta.get(s.Sku);
-    const tebakan = dariMaster ? null : L.tebakShop(s.Sku, o.shops);
-    const asal = dariMaster ? 'master' : (tebakan ? 'tebakan dari kode SKU' : 'TIDAK KETEMU');
-    const shop = dariMaster ? dariMaster.join(' + ') : (tebakan || L.TANPA_SHOP);
+    const hasil = L.cariShop(s.Sku, { petaRack: peta, petaBundle: petaB, daftarShop: o.shops });
+    const shop = hasil.shops.length > 0 ? hasil.shops.join(' + ') : L.TANPA_SHOP;
+    const asal = NAMA_ASAL[hasil.asal] || 'TIDAK KETEMU';
     console.log(`  ${String(s.Sku).padEnd(44)} -> ${String(shop).padEnd(18)} (${asal})`);
+    if (hasil.asal === 'bundle') {
+      const komponen = petaB.get(s.Sku) || [];
+      for (const k of komponen) {
+        console.log(`      komponen: ${String(k).padEnd(40)} ${(peta.get(k) || ['(tidak di rack)']).join(' + ')}`);
+      }
+    }
   }
 
   garis('5. PESAN YANG AKAN DIKIRIM KE WHATSAPP');
-  const grup = L.kelompokkanPerShop(terkunci, peta, o.shops);
+  const grup = L.kelompokkanPerShop(terkunci, peta, o.shops, { petaBundle: petaB });
   console.log('Ringkasan:', L.ringkasan(grup), '\n');
 
   // PIC dibaca apa adanya dari bawaan - nomor sungguhan hanya ada di

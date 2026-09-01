@@ -422,6 +422,17 @@ class OcsClient {
   }
 
   /**
+   * Master Bundle - isi tiap bundle: BundleSku -> daftar SellerSku komponen.
+   * Bundle tidak punya rak sendiri, jadi shopnya hanya bisa diketahui
+   * lewat komponennya. Tanpa parameter; sekitar 1.800 baris (~570 KB).
+   */
+  async fetchBundle() {
+    const hasil = await this.getJson('/MasterData/GetBundle');
+    if (!hasil) return [];
+    return Array.isArray(hasil) ? hasil : (hasil.value || hasil.data || []);
+  }
+
+  /**
    * Master Sku Rack - satu-satunya sumber pemetaan SellerSku -> ShopCode.
    * Tidak menerima parameter apa pun; seluruh isinya (sekitar 700 baris,
    * ~220 KB) dikembalikan sekaligus.

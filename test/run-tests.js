@@ -2883,11 +2883,24 @@ async function run() {
     };
   }
 
+  const BUNDLE_CONTOH = [
+    { BundleSku: 'BDL-HANASUI-0000001580', BundleName: 'Paket Cushion',
+      Items: [{ SellerSku: 'POWER-MINIPORE-SERUM', SellerSkuQty: 1 }] },
+    // Kode bundle tidak menyebut shop - hanya komponennya yang tahu.
+    { BundleSku: 'GIMMICK-PAKET-MISTERI', BundleName: 'Paket',
+      Items: [{ SellerSku: 'FYNE-EXTRAIT-TOBACCO', SellerSkuQty: 1 }] },
+    // Komponennya terdaftar di dua shop; kode bundle yang menentukan.
+    { BundleSku: 'BDL-NCO-0000009999', BundleName: 'Paket NCO',
+      Items: [{ SellerSku: 'BALMTINT-SASSY-3', SellerSkuQty: 1 }] },
+  ];
+
   function clientLockPalsu(catat = {}) {
     catat.rack = 0;
+    catat.bundle = 0;
     return {
       fetchUnderReserve: async (f) => { catat.filter = f; return (catat.stok || STOK_LOCK); },
       fetchSkuRack: async () => { catat.rack += 1; return RACK_CONTOH; },
+      fetchBundle: async () => { catat.bundle += 1; return (catat.bundleData || BUNDLE_CONTOH); },
     };
   }
 
@@ -2923,6 +2936,95 @@ async function run() {
     assert.strictEqual(grup.get('NCO').length, 1);
     assert.strictEqual(grup.get('Hanasui').length, 1);
     assert.strictEqual(grup.get('NCO')[0].banyakShop, true, 'ditandai agar bisa dijelaskan di pesan');
+  });
+
+  /* ------------------- shop bundle lewat komponennya ------------------ */
+
+  await test('shop bundle diambil dari SellerSku komponennya, bukan ditebak', () => {
+    const rack = LR.petaShop(RACK_CONTOH);
+    const bundle = LR.petaBundle(BUNDLE_CONTOH);
+    const hasil = LR.cariShop('BDL-HANASUI-0000001580', { petaRack: rack, petaBundle: bundle });
+    assert.deepStrictEqual(hasil.shops, ['Hanasui']);
+    assert.strictEqual(hasil.asal, 'bundle', 'asalnya master bundle, bukan tebakan kode');
+  });
+
+  await test('bundle yang kodenya TIDAK menyebut shop tetap ketemu lewat komponennya', () => {
+    const hasil = LR.cariShop('GIMMICK-PAKET-MISTERI', {
+      petaRack: LR.petaShop(RACK_CONTOH), petaBundle: LR.petaBundle(BUNDLE_CONTOH),
+    });
+    assert.deepStrictEqual(hasil.shops, ['FYNE'], 'tebakan kode tidak akan bisa menemukan ini');
+    assert.strictEqual(hasil.asal, 'bundle');
+  });
+
+  await test('komponen yang terdaftar di 2 shop dipersempit oleh kode bundle', () => {
+    const hasil = LR.cariShop('BDL-NCO-0000009999', {
+      petaRack: LR.petaShop(RACK_CONTOH), petaBundle: LR.petaBundle(BUNDLE_CONTOH),
+    });
+    assert.deepStrictEqual(hasil.shops, ['NCO'],
+      'komponennya Hanasui+NCO, kode bundle menyebut NCO - jangan kirim ke dua PIC');
+  });
+
+  await test('bundle yang benar-benar campur shop dikirim ke semua shop terkait', () => {
+    const rack = LR.petaShop([
+      { SellerSku: 'A', ShopCode: 'FYNE' },
+      { SellerSku: 'B', ShopCode: 'EOMMA' },
+    ]);
+    const bundle = LR.petaBundle([{ BundleSku: 'PAKET-CAMPUR', Items: [{ SellerSku: 'A' }, { SellerSku: 'B' }] }]);
+    const hasil = LR.cariShop('PAKET-CAMPUR', { petaRack: rack, petaBundle: bundle });
+    assert.deepStrictEqual(hasil.shops.sort(), ['EOMMA', 'FYNE']);
+  });
+
+  await test('Master Sku Rack tetap menang atas Master Bundle', () => {
+    const rack = LR.petaShop([{ SellerSku: 'X', ShopCode: 'NCO' }]);
+    const bundle = LR.petaBundle([{ BundleSku: 'X', Items: [{ SellerSku: 'Y' }] }]);
+    const hasil = LR.cariShop('X', { petaRack: rack, petaBundle: bundle });
+    assert.deepStrictEqual(hasil.shops, ['NCO']);
+    assert.strictEqual(hasil.asal, 'master');
+  });
+
+  await test('penjadwal menarik Master Bundle dan memakainya untuk mengelompokkan', async () => {
+    const catat = {};
+    const terkirim = [];
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async (gid, teks) => { terkirim.push(teks); } },
+      config: lockConfigPalsu(), client: clientLockPalsu(catat),
+    });
+    catat.stok = [{ Sku: 'GIMMICK-PAKET-MISTERI', AreaId: 'Pusat', Category: 'Bundle',
+      AvailableQty: 0, ReserveQty: 5, IsActive: true }];
+    await s.runOnce({ paksa: true });
+    assert.strictEqual(catat.bundle, 1, 'master bundle ikut ditarik');
+    assert.ok(terkirim.some((t) => t.includes('Shoop FYNE')),
+      'bundle tanpa kode shop tetap sampai ke PIC yang benar');
+  });
+
+  await test('Master Bundle gagal diambil tidak menggagalkan peringatan', async () => {
+    const catat = {};
+    const terkirim = [];
+    const client = clientLockPalsu(catat);
+    client.fetchBundle = async () => { throw new Error('OCS 503'); };
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async (gid, teks) => { terkirim.push(teks); } },
+      config: lockConfigPalsu(), client,
+    });
+    const hasil = await s.runOnce({ paksa: true });
+    assert.strictEqual(hasil.status, 'sent', 'peringatan tetap terkirim');
+    assert.ok(terkirim.length > 0);
+  });
+
+  await test('kedua master di-cache bersama, tidak ditarik ulang tiap putaran', async () => {
+    const catat = {};
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: lockConfigPalsu(), client: clientLockPalsu(catat),
+    });
+    await s.runOnce({ paksa: true });
+    await s.runOnce({ paksa: true });
+    await s.runOnce({ paksa: true });
+    assert.strictEqual(catat.rack, 1);
+    assert.strictEqual(catat.bundle, 1);
   });
 
   await test('bundle yang belum ada di master ditebak dari kode SKU', () => {
@@ -2978,6 +3080,37 @@ async function run() {
     assert.ok(t.includes('Avail'));
     assert.ok(t.includes('*Mohon segera lepas Lock Stock sebelum terjadi Oversell.*'));
     assert.ok(t.includes('_Sent by BOT-WRH_'));
+  });
+
+  await test('bundle TIDAK memicu teguran "belum terdaftar" - bundle memang tak punya rak', () => {
+    const grup = LR.kelompokkanPerShop([
+      { Sku: 'BDL-HANASUI-0000001580', AreaId: 'Pusat', Category: 'Bundle', AvailableQty: 0, ReserveQty: 1 },
+    ], LR.petaShop(RACK_CONTOH));
+    const hasil = LR.renderLockAlert(
+      { shop: 'Hanasui', baris: grup.get('Hanasui'), pic: [{ nama: 'Ibu Sandra' }] }, { now: new Date() });
+    assert.ok(!/belum terdaftar di Master Sku Rack/.test(hasil.text),
+      'teguran ini akan muncul di hampir setiap pesan dan jadi kebisingan');
+    assert.strictEqual(grup.get('Hanasui')[0].tanpaRack, true);
+  });
+
+  await test('SKU biasa yang belum terdaftar TETAP ditegur - itu celah data sungguhan', () => {
+    const grup = LR.kelompokkanPerShop([
+      { Sku: 'FYNE-BARANG-BARU', AreaId: 'Pusat', Category: 'Sku', AvailableQty: 0, ReserveQty: 3 },
+    ], LR.petaShop(RACK_CONTOH));
+    const hasil = LR.renderLockAlert(
+      { shop: 'FYNE', baris: grup.get('FYNE'), pic: [{ nama: 'Bpk. Reza' }] }, { now: new Date() });
+    assert.ok(/belum terdaftar di Master Sku Rack/.test(hasil.text));
+    assert.ok(/master\/sku-rack/.test(hasil.text), 'sebutkan di mana mendaftarkannya');
+  });
+
+  await test('bundle dan SKU biasa bercampur: teguran muncul karena SKU biasanya', () => {
+    const grup = LR.kelompokkanPerShop([
+      { Sku: 'BDL-FYNE-0000000001', AreaId: 'Pusat', Category: 'Bundle', AvailableQty: 0, ReserveQty: 1 },
+      { Sku: 'FYNE-BARANG-BARU', AreaId: 'Pusat', Category: 'Sku', AvailableQty: 0, ReserveQty: 3 },
+    ], LR.petaShop(RACK_CONTOH));
+    const hasil = LR.renderLockAlert(
+      { shop: 'FYNE', baris: grup.get('FYNE'), pic: [{ nama: 'Bpk. Reza' }] }, { now: new Date() });
+    assert.ok(/belum terdaftar di Master Sku Rack/.test(hasil.text));
   });
 
   await test('kolom tabel lurus - lebarnya mengikuti isi terpanjang', () => {

@@ -1715,6 +1715,7 @@ forward Telegram maupun dari laporan OCS dan laporan stok.
 |---|---|---|
 | `GET /odata/DTO_WmsItemStockLiteV2` | Stocks > View V2 | SKU, Available Qty, Reserve Qty |
 | `GET /MasterData/GetSkuRack` | Master > Sku Rack | pemetaan Seller SKU -> Shop |
+| `GET /MasterData/GetBundle` | Master > Bundle | isi bundle -> Seller SKU komponennya |
 
 Keduanya hanya dibaca; ada uji otomatis yang menjaganya tetap begitu.
 
@@ -1757,16 +1758,48 @@ Data stok tidak memuat Shop, jadi Shop dicari dari Master Sku Rack:
    bin dan SAP code-nya identik. SKU seperti itu masuk ke daftar **kedua**
    shop, karena keduanya sama-sama bisa kena oversell, dan pesannya diberi
    keterangan.
-2. **Tebakan dari kode SKU**. Bundle seperti `BDL-HANASUI-0000001580`
-   tidak ada di master, tetapi nama shopnya jelas tertulis. Hanya potongan
-   **utuh** antar tanda hubung yang diterima, jadi `NCOBALM` tidak dibaca
-   sebagai NCO.
-3. **Keranjang "TANPA SHOP"**. Kalau tetap tidak ketemu, SKU-nya tetap
-   dilaporkan dengan keterangan - tidak pernah ada SKU yang hilang
-   diam-diam hanya karena belum terdaftar di master.
+2. **Bundle: lewat komponennya.** Bundle adalah barang virtual - gabungan
+   beberapa SKU fisik - sehingga tidak punya rak dan **tidak akan pernah
+   ada di Master Sku Rack** (dicek ke OCS: nol dari 677 baris master
+   berawalan `BDL-`). Master Bundle memberi daftar Seller SKU
+   penyusunnya, dan Seller SKU itulah yang dicari di Sku Rack:
 
-Master Sku Rack (sekitar 700 baris) disimpan sementara selama
-`LOCK_RACK_CACHE_MINUTES` supaya tidak ditarik ulang tiap jam.
+   ```
+   BDL-HANASUI-0000001580
+     -> GIMMICK-CHEEK-BLUSH-PINK                  -> Hanasui
+     -> DAILY-COVER-TWO-WAY-CAKE-N12-LIGHT-IVORY  -> Hanasui
+     -> DAILY-MATTE-SERUM-CUSHION-N12-CLASSY-IVORY-> Hanasui
+   ```
+
+   Diperiksa ke data sungguhan (1.807 bundle):
+
+   | | |
+   |---|---|
+   | Bundle yang berhasil dipetakan lewat komponen | **1.807 (100%)** |
+   | Bundle yang hasilnya berbeda dari nama shop di kodenya | **0** |
+   | Bundle yang komponennya menunjuk lebih dari satu shop | 210 |
+   | ...hanya karena komponennya terdaftar di 2 shop | 209 |
+   | ...bundle yang benar-benar campur shop | 1 |
+   | Bundle yang kodenya tidak menyebut shop sama sekali | 2 |
+
+   Untuk 209 kasus itu, bila kode bundle menyebut salah satu shop yang
+   terlibat, shop itulah yang dipakai - supaya peringatannya tidak
+   dikirim ke dua PIC padahal yang menjual cuma satu. Satu bundle yang
+   memang campuran tetap dikirim ke semua shop terkait.
+
+3. **Tebakan dari kode SKU**, untuk yang tidak tertutup dua cara di atas.
+   Hanya potongan **utuh** antar tanda hubung yang diterima, jadi
+   `NCOBALM` tidak dibaca sebagai NCO. Hanya SKU yang sampai di lapis ini
+   yang memicu teguran "belum terdaftar" di pesan - itu celah data
+   sungguhan yang layak ditutup di `/master/sku-rack`.
+4. **Keranjang "TANPA SHOP"**. Kalau tetap tidak ketemu, SKU-nya tetap
+   dilaporkan dengan keterangan - tidak pernah ada SKU yang hilang
+   diam-diam.
+
+Kedua master (Sku Rack ~700 baris, Bundle ~1.800 baris) disimpan
+sementara selama `LOCK_RACK_CACHE_MINUTES` supaya tidak ditarik ulang
+tiap jam. Bila Master Bundle gagal diambil, peringatan **tetap dikirim** -
+shop bundle hanya turun ke tebakan dari kodenya.
 
 ### 23.4 PIC per Shop
 
@@ -1868,7 +1901,9 @@ WhatsApp yang terkirim. Bagian 4 menampilkan asal shop tiap SKU
 (`master` / `tebakan dari kode SKU` / `TIDAK KETEMU`) - itu tempat pertama
 yang dilihat kalau ada SKU yang masuk ke shop yang salah.
 
-`--rack` menampilkan daftar SKU yang terdaftar di lebih dari satu shop.
+`--rack` menampilkan daftar SKU yang terdaftar di lebih dari satu shop,
+plus statistik bundle. Untuk bundle, bagian 4 juga merinci komponennya
+satu per satu beserta shop tiap komponen.
 
 ### 23.8 Contoh pesan
 
@@ -1900,6 +1935,7 @@ lurus; tanpa itu font proporsional WhatsApp membuat angkanya bergeser.
 | Gejala | Sebab yang paling sering |
 |---|---|
 | SKU masuk ke shop yang salah | Belum terdaftar di Master Sku Rack sehingga ditebak dari kodenya. Cek `npm run lock:test` bagian 4 |
+| Muncul "sebagian SKU belum terdaftar" | Ada SKU berkategori Sku yang belum ada di `/master/sku-rack`. Bundle tidak pernah memicu pesan ini |
 | Banyak SKU jadi "TANPA SHOP" | Master Sku Rack belum lengkap - daftarkan SKU-nya di `/master/sku-rack` |
 | PIC tidak menerima notifikasi | Nomornya belum diisi (`/lockwa`), atau nomornya bukan anggota group tersebut |
 | Kolom tabel tidak lurus | `LOCK_MONOSPACE=false`. Kembalikan ke `true` |

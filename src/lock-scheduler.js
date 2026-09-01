@@ -65,7 +65,7 @@ class LockScheduler {
     this.lastRingkasan = '-';
     this.lastSkip = null;        // {waktu, alasan} - kenapa putaran terjadwal tidak mengirim
     this.stats = { runs: 0, sent: 0, failed: 0, skipped: 0, alerts: 0 };
-    this._rack = null;          // {waktu, peta}
+    this._master = null;        // {waktu, rack, bundle}
   }
 
   /* --------------------------- pengaturan --------------------------- */
@@ -399,21 +399,41 @@ class LockScheduler {
 
     if (terkunci.length === 0) return { terkunci, grup: new Map() };
 
-    const peta = await this.petaShop();
-    const grup = L.kelompokkanPerShop(terkunci, peta, o.shops);
+    const { rack, bundle } = await this.master();
+    const grup = L.kelompokkanPerShop(terkunci, rack, o.shops, { petaBundle: bundle });
     return { terkunci, grup };
   }
 
-  /** Master Sku Rack, disimpan sementara supaya tidak ditarik tiap jam. */
-  async petaShop() {
+  /**
+   * Master Sku Rack + Master Bundle, disimpan sementara supaya keduanya
+   * tidak ditarik ulang tiap jam (bersama-sama sekitar 800 KB).
+   *
+   * Bundle diambil karena bundle TIDAK punya rak: shopnya hanya bisa
+   * diketahui lewat SellerSku komponennya, dan komponen itulah yang
+   * dicari di Sku Rack.
+   */
+  async master() {
     const o = this.opsi();
     const umur = o.rackCacheMinutes * 60000;
-    if (this._rack && Date.now() - this._rack.waktu < umur) return this._rack.peta;
-    const rack = await this.client.fetchSkuRack();
-    const peta = L.petaShop(rack);
-    this._rack = { waktu: Date.now(), peta };
-    logger.info(`Master Sku Rack: ${rack.length} baris, ${peta.size} SKU dipetakan ke shop.`);
-    return peta;
+    if (this._master && Date.now() - this._master.waktu < umur) return this._master;
+
+    const daftarRack = await this.client.fetchSkuRack();
+    const rack = L.petaShop(daftarRack);
+
+    let bundle = new Map();
+    try {
+      const daftarBundle = await this.client.fetchBundle();
+      bundle = L.petaBundle(daftarBundle);
+      logger.info(`Master Bundle: ${daftarBundle.length} bundle, ${bundle.size} punya komponen.`);
+    } catch (err) {
+      // Bundle gagal diambil bukan alasan menggagalkan seluruh peringatan -
+      // shop bundle akan jatuh ke tebakan dari kodenya.
+      logger.warn(`Master Bundle gagal diambil (${err.message}). Shop bundle akan ditebak dari kodenya.`);
+    }
+
+    this._master = { waktu: Date.now(), rack, bundle };
+    logger.info(`Master Sku Rack: ${daftarRack.length} baris, ${rack.size} SKU dipetakan ke shop.`);
+    return this._master;
   }
 
   /**
