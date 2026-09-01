@@ -226,8 +226,8 @@ class TelegramService {
           '/lock       - periksa & kirim sekarang',
           '/lockstatus - pengaturan, PIC, jadwal berikutnya',
           '/lockon, /lockoff - nyalakan / matikan pemeriksaan',
-          '/lockpic <Shop> <Nama>  - nama PIC tiap shop',
-          '/lockwa <Shop> <Nomor>  - nomor PIC agar di-mention',
+          '/lockpic <Shop> <Nama>  - PIC tiap shop (boleh >1, pisah koma)',
+          '/lockwa <Shop> <Nomor>  - nomor PIC agar di-mention (urut, pisah koma)',
           '/lockjeda 60 7    - jeda menit + penyimpangan acak',
           '/lockgroup        - group WhatsApp tujuan',
           '/lockulang on|off - ulangi pesan yang sama tiap jam?',
@@ -491,8 +491,14 @@ class TelegramService {
             const sisa = pisah.join(' ').trim();
             if (!shop) {
               await this.bot.sendMessage(chatId, cmd === '/lockpic'
-                ? 'Contoh: /lockpic NCO Ibu Manda'
-                : 'Contoh: /lockwa NCO 6281234567890  (tulis "hapus" untuk membuang nomornya)');
+                ? 'Contoh satu PIC   : /lockpic NCO Ibu Manda\n'
+                  + 'Contoh dua PIC    : /lockpic NCO Ibu Manda, Bpk. Andi\n\n'
+                  + 'Perintah ini mengganti SELURUH daftar PIC shop tersebut.'
+                : 'Contoh satu nomor : /lockwa NCO 6281234567890\n'
+                  + 'Contoh dua nomor  : /lockwa NCO 6281234567890, 6289876543210\n\n'
+                  + 'Nomor dipasangkan URUT dengan nama di /lockpic.\n'
+                  + 'Tulis "kosong" untuk melewati satu orang, contoh: 62811, kosong, 62833\n'
+                  + 'Tulis "hapus" untuk membuang semua nomor di shop itu.');
               return true;
             }
             const pesan = cmd === '/lockpic'

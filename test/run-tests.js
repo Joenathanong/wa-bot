@@ -3060,6 +3060,105 @@ async function run() {
     assert.ok(terkirim.some((t) => t.includes('Dear Bpk. Reza') && t.includes('Shoop FYNE')));
   });
 
+  await test('satu shop bisa punya BANYAK PIC, semuanya di-mention', async () => {
+    const terkirim = [];
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async (gid, teks, m) => { terkirim.push({ teks, m }); } },
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    s.setPicNama('NCO', 'Ibu Manda, Bpk. Andi');
+    s.setPicNomor('NCO', '6281111111111, 6282222222222');
+    await s.runOnce({ paksa: true });
+    const nco = terkirim.find((t) => t.teks.includes('Shoop NCO'));
+    assert.ok(nco.teks.includes('*Dear Ibu Manda @6281111111111 & Bpk. Andi @6282222222222*'),
+      nco.teks.split('\n')[0]);
+    assert.deepStrictEqual(nco.m, ['6281111111111@c.us', '6282222222222@c.us']);
+  });
+
+  await test('PIC tanpa nomor tetap ikut disapa bersama yang punya nomor', async () => {
+    const terkirim = [];
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async (gid, teks, m) => { terkirim.push({ teks, m }); } },
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    s.setPicNama('NCO', 'Ibu Manda, Bpk. Andi, Sdr. Rio');
+    s.setPicNomor('NCO', '6281111111111, kosong, 6283333333333');
+    await s.runOnce({ paksa: true });
+    const nco = terkirim.find((t) => t.teks.includes('Shoop NCO'));
+    assert.ok(nco.teks.includes('Ibu Manda @6281111111111, Bpk. Andi & Sdr. Rio @6283333333333'),
+      nco.teks.split('\n')[0]);
+    assert.deepStrictEqual(nco.m, ['6281111111111@c.us', '6283333333333@c.us'],
+      'hanya yang punya nomor yang di-mention');
+  });
+
+  await test('mengganti nama PIC tidak mengacaukan nomor orang lain', () => {
+    const s = new LockScheduler({
+      db: dbPalsu(), whatsapp: { isReady: () => true }, queue: new Queue({ delayMs: 0 }),
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    s.setPicNama('NCO', 'Ibu Manda, Bpk. Andi');
+    s.setPicNomor('NCO', '6281111111111, 6282222222222');
+    s.setPicNama('NCO', 'Ibu Manda, Bpk. Budi');       // orang ke-2 diganti
+    const daftar = s.picMap().NCO;
+    assert.strictEqual(daftar[0].nomor, '6281111111111', 'nomor orang ke-1 tetap');
+    assert.strictEqual(daftar[1].nama, 'Bpk. Budi');
+    assert.strictEqual(daftar[1].nomor, '6282222222222', 'nomor mengikuti posisi');
+  });
+
+  await test('mengurangi daftar PIC membuang sisanya, dan dikatakan terus terang', () => {
+    const s = new LockScheduler({
+      db: dbPalsu(), whatsapp: { isReady: () => true }, queue: new Queue({ delayMs: 0 }),
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    s.setPicNama('NCO', 'A, B, C');
+    const pesan = s.setPicNama('NCO', 'A');
+    assert.strictEqual(s.picMap().NCO.length, 1);
+    assert.ok(/2 PIC sebelumnya dihapus/.test(pesan), pesan);
+  });
+
+  await test('nomor lebih banyak daripada nama ditolak, bukan diam-diam dibuang', () => {
+    const s = new LockScheduler({
+      db: dbPalsu(), whatsapp: { isReady: () => true }, queue: new Queue({ delayMs: 0 }),
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    s.setPicNama('NCO', 'Ibu Manda');
+    assert.throws(() => s.setPicNomor('NCO', '6281111111111, 6282222222222'),
+      /hanya 1 nama PIC/);
+  });
+
+  await test('nomor yang salah tulis menyebut orang KE-BERAPA yang bermasalah', () => {
+    const s = new LockScheduler({
+      db: dbPalsu(), whatsapp: { isReady: () => true }, queue: new Queue({ delayMs: 0 }),
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    s.setPicNama('NCO', 'A, B');
+    assert.throws(() => s.setPicNomor('NCO', '6281111111111, 081234567890'), /nomor ke-2/);
+  });
+
+  await test('pengaturan PIC lama (satu obyek) tetap terbaca setelah pembaruan', () => {
+    const db = dbPalsu({ lock_pic: JSON.stringify({ NCO: { nama: 'Ibu Manda', nomor: '6281111111111' } }) });
+    const s = new LockScheduler({
+      db, whatsapp: { isReady: () => true }, queue: new Queue({ delayMs: 0 }),
+      config: lockConfigPalsu(), client: clientLockPalsu(),
+    });
+    const daftar = s.picMap().NCO;
+    assert.ok(Array.isArray(daftar), 'bentuk lama harus diubah menjadi array');
+    assert.strictEqual(daftar.length, 1);
+    assert.strictEqual(daftar[0].nama, 'Ibu Manda');
+    assert.strictEqual(daftar[0].nomor, '6281111111111');
+  });
+
+  await test('nomor yang sama untuk dua PIC tidak di-mention dua kali', () => {
+    const hasil = LR.sapaanPic([
+      { nama: 'Ibu Manda', nomor: '628111' },
+      { nama: 'Bpk. Andi', nomor: '628111' },
+    ]);
+    assert.deepStrictEqual(hasil.jids, ['628111@c.us']);
+    assert.ok(hasil.teks.includes('Ibu Manda') && hasil.teks.includes('Bpk. Andi'));
+  });
+
   await test('PIC bisa diganti dan nomornya dipakai sebagai mention', async () => {
     const terkirim = [];
     const s = new LockScheduler({
@@ -3083,7 +3182,7 @@ async function run() {
     assert.throws(() => s.setPicNomor('NCO', '+6281234567890'), /tanda \+/);
     assert.throws(() => s.setPicNomor('NCO', '081234567890'), /0 di depan/);
     assert.throws(() => s.setPicNomor('SHOP-HANTU', '6281234567890'), /tidak dikenal/);
-    assert.ok(/dihapus/.test(s.setPicNomor('NCO', 'hapus')));
+    assert.ok(/Semua nomor PIC NCO dihapus/.test(s.setPicNomor('NCO', 'hapus')));
   });
 
   await test('Master Sku Rack tidak ditarik ulang tiap putaran', async () => {

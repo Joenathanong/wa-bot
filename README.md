@@ -1791,7 +1791,41 @@ aplikasi WhatsApp penerima yang menampilkannya sebagai nama kontak.
 Tanpa nomor, PIC tetap disapa dengan namanya, hanya tanpa mention.
 
 Nomor ditulis dengan kode negara, tanpa `+` dan tanpa `0` di depan.
-Tulis `/lockwa NCO hapus` untuk membuang nomornya.
+
+#### Satu shop dengan lebih dari satu PIC
+
+Pisahkan dengan koma. Nomor dipasangkan **menurut urutan** dengan namanya:
+
+```
+/lockpic NCO Ibu Manda, Bpk. Andi
+/lockwa  NCO 6281234567890, 6289876543210
+```
+
+Hasilnya:
+
+```
+*Dear Ibu Manda @6281234567890 & Bpk. Andi @6289876543210*
+```
+
+Keduanya di-mention sungguhan. Untuk tiga orang atau lebih formatnya
+menjadi `A, B & C`.
+
+Aturan yang perlu diingat:
+
+- **`/lockpic` mengganti SELURUH daftar**, bukan menambah. Menulis
+  `/lockpic NCO Ibu Manda` pada shop yang tadinya punya dua PIC akan
+  menyisakan satu orang - dan bot mengatakannya terus terang di balasannya.
+- **Nomor mengikuti posisi nama.** Mengganti nama orang ke-2 tidak
+  mengacaukan nomor orang ke-1.
+- **Melewati satu orang:** tulis `kosong` di posisinya, misalnya
+  `/lockwa NCO 6281234567890, kosong, 6283333333333`. Orang ke-2 tetap
+  disapa, hanya tidak di-mention.
+- **Nomor lebih banyak daripada nama akan ditolak**, bukan dibuang
+  diam-diam. Tambahkan namanya dulu lewat `/lockpic`.
+- Nomor yang sama untuk dua PIC hanya di-mention sekali.
+- `/lockwa NCO hapus` membuang **semua** nomor di shop itu; namanya tetap.
+
+Cek hasilnya kapan saja dengan `/lockstatus`.
 
 ### 23.5 Perintah Telegram
 
@@ -1800,8 +1834,8 @@ Tulis `/lockwa NCO hapus` untuk membuang nomornya.
 | `/lock` | Periksa dan kirim **sekarang** (menembus tombol mati) |
 | `/lockstatus` | Pengaturan, PIC, temuan terakhir, jadwal berikutnya |
 | `/lockon`, `/lockoff` | Nyalakan / matikan pemeriksaan berkala |
-| `/lockpic <Shop> <Nama>` | Nama PIC |
-| `/lockwa <Shop> <Nomor>` | Nomor PIC untuk mention |
+| `/lockpic <Shop> <Nama>` | Nama PIC. Boleh lebih dari satu, pisah koma |
+| `/lockwa <Shop> <Nomor>` | Nomor PIC untuk mention, urut sesuai namanya |
 | `/lockjeda 60 7` | Jeda 60 menit, digeser acak +/- 7 menit |
 | `/lockgroup <JID atau nama>` | Group tujuan. Kosongkan = semua group aktif |
 | `/lockulang on\|off` | `off` = jangan ulangi pesan yang isinya sama persis |

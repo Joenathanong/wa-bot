@@ -98,18 +98,25 @@ class LockScheduler {
     };
   }
 
-  /** PIC tiap shop: {NCO: {nama, nomor}, ...} */
+  /**
+   * PIC tiap shop: {NCO: [{nama, nomor}, ...], ...}
+   *
+   * Satu shop boleh punya lebih dari satu PIC. Pengaturan lama yang
+   * menyimpan satu obyek {nama, nomor} tetap terbaca - L.normalisasiPic
+   * mengubahnya menjadi array berisi satu orang.
+   */
   picMap() {
     const hasil = {};
     for (const shop of this.dasar.shops || L.SHOP_BAWAAN) {
-      hasil[shop] = { nama: L.PIC_BAWAAN[shop] || 'Tim', nomor: '' };
+      hasil[shop] = [{ nama: L.PIC_BAWAAN[shop] || 'Tim', nomor: '' }];
     }
     try {
       const mentah = this._setting(KUNCI.pic, '');
       if (mentah) {
         const tersimpan = JSON.parse(mentah);
         for (const [shop, isi] of Object.entries(tersimpan || {})) {
-          hasil[shop] = { ...(hasil[shop] || {}), ...isi };
+          const daftar = L.normalisasiPic(isi);
+          if (daftar.length > 0) hasil[shop] = daftar;
         }
       }
     } catch (err) {
@@ -129,32 +136,77 @@ class LockScheduler {
     return daftar.find((s) => s.toLowerCase() === cari) || null;
   }
 
+  /** "a, b , c" -> ['a','b','c'] */
+  static pisahKoma(teks) {
+    return String(teks || '').split(',').map((x) => x.trim()).filter(Boolean);
+  }
+
+  /** Tampilkan daftar PIC satu shop, siap ditempel di balasan Telegram. */
+  static daftarPic(daftar) {
+    return daftar
+      .map((p, i) => `  ${i + 1}. ${p.nama}${p.nomor ? ` (@${p.nomor})` : ' - belum ada nomor'}`)
+      .join('\n');
+  }
+
+  /**
+   * Setel SELURUH daftar nama PIC satu shop sekaligus, dipisah koma.
+   * Nomor yang sudah ada dipertahankan MENURUT URUTAN, jadi mengganti
+   * nama orang ke-2 tidak mengacaukan nomor orang ke-1.
+   */
   setPicNama(shop, nama) {
     const s = this._cariShop(shop);
     if (!s) throw new Error(`shop "${shop}" tidak dikenal. Pilihan: ${this.dasar.shops.join(', ')}`);
-    const teks = String(nama || '').trim();
-    if (!teks) throw new Error('nama PIC tidak boleh kosong');
+    const namaBaru = LockScheduler.pisahKoma(nama);
+    if (namaBaru.length === 0) throw new Error('nama PIC tidak boleh kosong');
+
     const peta = this.picMap();
-    peta[s] = { ...(peta[s] || {}), nama: teks };
+    const lama = peta[s] || [];
+    peta[s] = namaBaru.map((n, i) => ({ nama: n, nomor: (lama[i] && lama[i].nomor) || '' }));
     this._simpanPic(peta);
-    return `PIC ${s}: ${teks}`;
+
+    const hilang = lama.length - namaBaru.length;
+    return `PIC ${s} (${namaBaru.length} orang):\n${LockScheduler.daftarPic(peta[s])}`
+      + (hilang > 0 ? `\n\n${hilang} PIC sebelumnya dihapus dari daftar ini.` : '');
   }
 
+  /**
+   * Setel nomor PIC satu shop, dipisah koma, DIPASANGKAN MENURUT URUTAN
+   * dengan daftar namanya. Nomor yang tidak diisi berarti PIC itu tetap
+   * disapa tetapi tanpa mention.
+   */
   setPicNomor(shop, nomor) {
     const s = this._cariShop(shop);
     if (!s) throw new Error(`shop "${shop}" tidak dikenal. Pilihan: ${this.dasar.shops.join(', ')}`);
     const peta = this.picMap();
-    const kosong = String(nomor || '').trim() === '' || /^(hapus|kosong|-)$/i.test(String(nomor).trim());
-    if (kosong) {
-      peta[s] = { ...(peta[s] || {}), nomor: '' };
+    const daftar = peta[s] || [];
+    if (daftar.length === 0) throw new Error(`belum ada PIC di ${s}. Isi namanya dulu dengan /lockpic`);
+
+    const mentah = String(nomor || '').trim();
+    if (mentah === '' || /^(hapus|kosong|-)$/i.test(mentah)) {
+      peta[s] = daftar.map((p) => ({ ...p, nomor: '' }));
       this._simpanPic(peta);
-      return `Nomor PIC ${s} dihapus - namanya tetap disapa, tetapi tanpa mention.`;
+      return `Semua nomor PIC ${s} dihapus - namanya tetap disapa, tetapi tanpa mention.`;
     }
-    const cek = validateWhatsappNumber(nomor);
-    if (!cek.ok) throw new Error(cek.error);
-    peta[s] = { ...(peta[s] || {}), nomor: cek.value };
+
+    const potongan = LockScheduler.pisahKoma(mentah);
+    if (potongan.length > daftar.length) {
+      throw new Error(
+        `ada ${potongan.length} nomor tetapi hanya ${daftar.length} nama PIC di ${s}. `
+        + `Tambahkan namanya dulu: /lockpic ${s} Nama1, Nama2`
+      );
+    }
+
+    const bersih = [];
+    for (const [i, n] of potongan.entries()) {
+      if (/^(kosong|-)$/i.test(n)) { bersih.push(''); continue; }   // lewati orang ke-i
+      const cek = validateWhatsappNumber(n);
+      if (!cek.ok) throw new Error(`nomor ke-${i + 1} ("${n}"): ${cek.error}`);
+      bersih.push(cek.value);
+    }
+
+    peta[s] = daftar.map((p, i) => ({ ...p, nomor: i < bersih.length ? bersih[i] : p.nomor }));
     this._simpanPic(peta);
-    return `Nomor PIC ${s}: ${cek.value} (akan di-mention sungguhan)`;
+    return `PIC ${s}:\n${LockScheduler.daftarPic(peta[s])}`;
   }
 
   setOpsi(nama, nilai) {
@@ -357,7 +409,7 @@ class LockScheduler {
       const baris = semua.slice(0, o.maxBaris);
       const sisa = semua.length - baris.length;
       const hasil = L.renderLockAlert(
-        { shop, baris, pic: pic[shop] || { nama: 'Tim' } },
+        { shop, baris, pic: pic[shop] || [{ nama: 'Tim' }] },
         {
           now: new Date(), tzOffsetMinutes: o.tzOffsetMinutes, tzLabel: o.tzLabel,
           monospace: o.monospace, maxSku: o.maxSku,
@@ -439,8 +491,11 @@ class LockScheduler {
     B.push(`Ulangi pesan yang sama: ${o.onlyOnChange ? 'TIDAK (hanya bila berubah)' : 'ya, tiap putaran'}`);
     B.push('');
     B.push('PIC per shop:');
-    for (const [shop, isi] of Object.entries(pic)) {
-      B.push(`  ${shop}: ${isi.nama}${isi.nomor ? ` (@${isi.nomor})` : ' - belum ada nomor, tanpa mention'}`);
+    for (const [shop, daftar] of Object.entries(pic)) {
+      const isi = daftar
+        .map((p) => `${p.nama}${p.nomor ? ` (@${p.nomor})` : ' [tanpa nomor]'}`)
+        .join(', ');
+      B.push(`  ${shop}: ${isi}`);
     }
     B.push('');
     B.push(`Terakhir diperiksa: ${jam(this.lastRunAt)}`);

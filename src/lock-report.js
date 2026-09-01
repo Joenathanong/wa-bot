@@ -26,6 +26,8 @@
  * ==========================================================
  */
 
+const { joinNatural } = require('./render');
+
 const SHOP_BAWAAN = ['NCO', 'Hanasui', 'FYNE', 'EOMMA'];
 const TANPA_SHOP = 'TANPA SHOP';
 
@@ -35,6 +37,50 @@ const PIC_BAWAAN = {
   FYNE: 'Bpk. Reza',
   EOMMA: 'Bpk. Maulana',
 };
+
+/* -------------------------------- PIC ---------------------------------- */
+
+/**
+ * Satu shop boleh punya lebih dari satu PIC.
+ *
+ * Menerima tiga bentuk sekaligus supaya pengaturan lama tetap terbaca:
+ *   - array  : [{nama, nomor}, ...]           (bentuk sekarang)
+ *   - obyek  : {nama, nomor}                  (bentuk lama, satu PIC)
+ *   - teks   : "Ibu Manda"                    (jaga-jaga)
+ * Selalu mengembalikan array, dan PIC tanpa nama dibuang.
+ */
+function normalisasiPic(nilai) {
+  if (!nilai) return [];
+  const daftar = Array.isArray(nilai) ? nilai : [nilai];
+  return daftar
+    .map((p) => (typeof p === 'string' ? { nama: p, nomor: '' } : p))
+    .filter((p) => p && String(p.nama || '').trim())
+    .map((p) => ({
+      nama: String(p.nama).trim(),
+      nomor: String(p.nomor || '').replace(/\D/g, ''),
+    }));
+}
+
+/**
+ * Susun sapaan "Ibu Manda @628111 & Bpk. Andi @628222" beserta daftar JID.
+ * Nomor yang sama tidak pernah di-mention dua kali.
+ */
+function sapaanPic(nilai) {
+  const daftar = normalisasiPic(nilai);
+  const bagian = [];
+  const jids = [];
+  const sudah = new Set();
+  for (const p of daftar) {
+    if (p.nomor) {
+      bagian.push(`${p.nama} @${p.nomor}`);
+      const jid = `${p.nomor}@c.us`;
+      if (!sudah.has(jid)) { sudah.add(jid); jids.push(jid); }
+    } else {
+      bagian.push(p.nama);
+    }
+  }
+  return { teks: joinNatural(bagian), jids, jumlah: daftar.length };
+}
 
 /* ---------------------------- pencarian shop --------------------------- */
 
@@ -188,7 +234,11 @@ const TEMPLATE_BAWAAN = [
  * mengenali mention bila teks memuat "@<nomor>" dan JID-nya ikut dikirim,
  * jadi {pic} menjadi "Ibu Manda @6281234567890".
  *
- * @param {{shop: string, baris: Array, pic?: {nama: string, nomor?: string}}} data
+ * Satu shop boleh punya beberapa PIC: "Ibu Manda @628111 & Bpk. Andi @628222".
+ * PIC yang belum ada nomornya tetap ikut disapa, hanya tanpa mention.
+ *
+ * @param {{shop: string, baris: Array,
+ *          pic?: Array<{nama: string, nomor?: string}>|{nama: string, nomor?: string}}} data
  * @returns {{text: string, mentions: string[], shop: string, jumlah: number}}
  */
 function renderLockAlert(data, opsi = {}) {
@@ -196,15 +246,9 @@ function renderLockAlert(data, opsi = {}) {
   const tz = opsi.tzLabel || 'WIB';
   const now = opsi.now || new Date();
   const baris = data.baris || [];
-  const pic = data.pic || {};
 
-  const mentions = [];
-  let sapaan = pic.nama || 'Tim';
-  const digits = String(pic.nomor || '').replace(/\D/g, '');
-  if (digits) {
-    sapaan = `${sapaan} @${digits}`;
-    mentions.push(`${digits}@c.us`);
-  }
+  const { teks: sapaanTeks, jids: mentions } = sapaanPic(data.pic);
+  const sapaan = sapaanTeks || 'Tim';
 
   const area = Array.from(new Set(baris.map((b) => b.area).filter(Boolean)));
   const template = opsi.template || TEMPLATE_BAWAAN;
@@ -246,6 +290,8 @@ module.exports = {
   TANPA_SHOP,
   PIC_BAWAAN,
   TEMPLATE_BAWAAN,
+  normalisasiPic,
+  sapaanPic,
   petaShop,
   tebakShop,
   saringTerkunci,
