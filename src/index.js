@@ -178,13 +178,33 @@ async function main() {
     });
 
     if (tg.admin) tg.admin.userSource = tgUser;
-    const ok = await tgUser.start();
-    if (!ok) {
-      tg.notifyAdmins(
-        'Pembaca akun Telegram TIDAK aktif (' + tgUser.state + '). ' +
-        'Peringatan stok dari bot lain tidak akan diteruskan. Jalankan: npm run tg:login'
-      );
-    }
+
+    // TIDAK di-await dengan sengaja.
+    //
+    // Dulu baris ini "await tgUser.start()". Ketika DNS bermasalah, GramJS
+    // connect() menggantung di retry internalnya dan start() tidak pernah
+    // selesai - sehingga penjadwal OCS/stok/lock DAN wa.start() di bawah
+    // TIDAK PERNAH dijalankan. Gejalanya membingungkan: bot Telegram hidup,
+    // Admin Menu menjawab, tetapi WhatsApp diam di status "stopped" berhari-hari
+    // tanpa satu pun baris [WA] di log.
+    //
+    // Pembaca akun Telegram bukan syarat WhatsApp berjalan, jadi biarkan ia
+    // menyambung di latar belakang dan lanjutkan proses start yang lain.
+    tgUser.start()
+      .then((ok) => {
+        if (!ok) {
+          tg.notifyAdmins(
+            'Pembaca akun Telegram TIDAK aktif (' + tgUser.state + '). ' +
+            'Peringatan stok dari bot lain tidak akan diteruskan. ' +
+            'Bagian lain (WhatsApp, OCS, stok, lock) tetap berjalan. ' +
+            'Bila sesi kedaluwarsa: npm run tg:login'
+          );
+        }
+      })
+      .catch((err) => {
+        logger.error('Pembaca akun Telegram gagal dijalankan:', err.message);
+        tg.notifyAdmins('Pembaca akun Telegram gagal dijalankan: ' + err.message);
+      });
   }
 
 

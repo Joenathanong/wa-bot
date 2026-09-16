@@ -113,6 +113,12 @@ async function main() {
       console.log('  -> terakhir diubah  :', fs.statSync(sesiKlien).mtime.toISOString());
     } catch (e) { /* abaikan */ }
 
+    if (u.bytes > 300 * 1048576) {
+      catat('PERHATIAN', `Folder sesi ${(u.bytes / 1048576).toFixed(0)} MB - jauh lebih besar dari biasanya.`,
+        'Profil Chrome yang membengkak membuat halaman lambat dimuat dan bisa '
+        + 'melewati batas WA_READY_TIMEOUT_MS. Bila langkah lain tidak menolong: '
+        + 'npm run wa:reset lalu pindai QR baru.');
+    }
     if (u.bytes < 1048576 || !adaDefault) {
       catat('GAWAT', 'Folder sesi ada tetapi isinya tidak wajar (terlalu kecil / tanpa "Default").',
         'Sesi kemungkinan rusak. Jalankan: npm run wa:reset lalu pindai QR baru.');
@@ -179,7 +185,10 @@ async function main() {
       'READY (berhasil)': /WhatsApp ready/,
       'macet sebelum ready': /tidak pernah mencapai status/,
       'browser sudah berjalan': /browser is already running/,
-      'sesi dicabut / logout': /LOGOUT|dicabut/i,
+      // Hanya peristiwa sungguhan. Jangan mencocokkan teks peringatan kita
+      // sendiri ("Bila muncul disconnected: LOGOUT, hapus WA_WEB_VERSION"),
+      // karena baris itu tercetak tiap kali start dan angkanya jadi ngawur.
+      'sesi dicabut / logout': /disconnected:\s*LOGOUT|SESI WHATSAPP DICABUT/,
       'auth_failure': /authentication failed/,
     };
     console.log('\n  Ringkasan kejadian:');
@@ -200,10 +209,32 @@ async function main() {
           'Ini TIDAK akan selesai sendiri berapa kali pun diulang. Buka chat admin '
           + 'Telegram, cari gambar QR terbaru, lalu pindai dari HP: WhatsApp > '
           + 'Perangkat Tertaut > Tautkan Perangkat.');
+      } else if (tahap === 'authenticated' && w.webVersion) {
+        catat('GAWAT',
+          `Macet di tahap authenticated PADAHAL versi sudah disematkan (${w.webVersion}).`,
+          'Menyematkan versi jelas TIDAK menolong di sini - kemungkinan besar justru '
+          + 'penyebabnya, karena build yang disematkan ditolak WhatsApp. HAPUS baris '
+          + 'WA_WEB_VERSION dari .env (beri tanda #), lalu jalankan ulang. Jangan '
+          + 'menambah versi lain sebelum mencoba tanpa sematan sama sekali.');
       } else if (tahap === 'authenticated') {
         catat('GAWAT', 'Macet di tahap authenticated - halaman WhatsApp Web tidak selesai dimuat.',
-          'Hampir selalu ketidakcocokan build. Setel WA_WEB_VERSION=2.3000.1015901307 '
+          'Biasanya ketidakcocokan build. Coba sematkan WA_WEB_VERSION=2.3000.1015901307 '
           + 'di .env lalu jalankan ulang. Bila malah logout, kosongkan lagi dan pindai QR baru.');
+      }
+    }
+
+    const kunciBrowser = wa.filter((b) => /browser is already running/.test(b));
+    if (kunciBrowser.length > 0) {
+      const terakhirKunci = (kunciBrowser[kunciBrowser.length - 1].match(/^\[([^\]]+)\]/) || [, '?'])[1];
+      const beberapaTerakhir = wa.slice(-12).filter((b) => /browser is already running/.test(b)).length;
+      if (beberapaTerakhir > 0) {
+        catat('GAWAT',
+          `Percobaan TERAKHIR gagal karena "browser is already running" (${terakhirKunci}).`,
+          'Ini penghalang yang sedang aktif sekarang - proses Chrome lama memegang '
+          + 'folder sesi sehingga percobaan baru selalu ditolak. Urutannya: hentikan '
+          + 'service dulu, BARU taskkill /F /IM chrome.exe /T, baru nyalakan lagi. '
+          + 'Kalau taskkill dijalankan sementara service masih hidup, service akan '
+          + 'langsung membuat proses Chrome baru dan masalahnya kembali.');
       }
     }
 

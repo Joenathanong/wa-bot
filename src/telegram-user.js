@@ -21,6 +21,24 @@ const logger = require('./logger').scope('TGUSER');
  * =========================================================
  */
 
+/**
+ * Jalankan sebuah promise dengan batas waktu.
+ *
+ * KENAPA PENTING: GramJS connect() punya retry internal (connectionRetries x
+ * retryDelay) dan autoReconnect. Bila DNS/jaringan bermasalah, connect() bisa
+ * MENGGANTUNG sangat lama tanpa pernah menolak. Tanpa batas waktu, pemanggil
+ * yang menunggunya ikut membeku - dan itu pernah membuat WhatsApp tidak
+ * pernah dijalankan sama sekali karena start()-nya menunggu di belakang.
+ */
+function denganBatasWaktu(promise, ms, nama) {
+  let timer = null;
+  const batas = new Promise((_, tolak) => {
+    timer = setTimeout(() => tolak(new Error(`${nama} melewati batas ${Math.round(ms / 1000)} detik`)), ms);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([promise, batas]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
 /** Ubah peer GramJS menjadi Chat ID gaya Bot API (-100xxx untuk supergroup). */
 function toBotApiChatId(peer) {
   if (peer === null || peer === undefined) return null;
@@ -138,9 +156,10 @@ class TelegramUserSource extends EventEmitter {
       'Transport:', this.clientOptions.useWSS ? 'WSS (port 443, ramah firewall)' : 'TCP polos (port 80)'
     );
 
+    const batasMs = Math.max(10000, Number(tu.connectTimeoutMs) || 60000);
     try {
-      await this.client.connect();
-      this.me = await this.client.getMe();
+      await denganBatasWaktu(this.client.connect(), batasMs, 'connect() akun Telegram');
+      this.me = await denganBatasWaktu(this.client.getMe(), batasMs, 'getMe() akun Telegram');
       this.connected = true;
       this.state = 'connected';
       const who = this.me ? (this.me.username ? '@' + this.me.username : this.me.firstName) : '(tidak diketahui)';
@@ -149,7 +168,16 @@ class TelegramUserSource extends EventEmitter {
       this.state = 'failed';
       this.lastError = err.message;
       logger.error('Gagal terhubung ke Telegram dengan akun:', err.message);
-      logger.error('Bila sesi kedaluwarsa, jalankan ulang: npm run tg:login');
+      if (/batas \d+ detik/.test(err.message)) {
+        logger.error('Sambungan menggantung, bukan ditolak. Biasanya DNS/jaringan:');
+        logger.error('  cek "getaddrinfo ENOTFOUND api.telegram.org" di log.');
+        logger.error('Pembaca akun akan dicoba ulang otomatis oleh watchdog.');
+      } else {
+        logger.error('Bila sesi kedaluwarsa, jalankan ulang: npm run tg:login');
+      }
+      try { if (this.client) await this.client.destroy(); } catch (e) { /* abaikan */ }
+      this.client = null;
+      this._startWatchdog();
       return false;
     }
 
