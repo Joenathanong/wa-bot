@@ -401,10 +401,18 @@ class WhatsAppService extends EventEmitter {
       logger.error(`WhatsApp tidak pernah mencapai status "ready" dalam ${detik} detik (macet di "${this.state}").`);
       if (this.stuckCount >= 2) {
         logger.error('');
-        logger.error('  Ini biasanya ketidakcocokan build WhatsApp Web dengan whatsapp-web.js.');
-        logger.error('  Coba sematkan build lama di .env lalu jalankan ulang:');
-        logger.error('    WA_WEB_VERSION=2.3000.1015901307');
-        logger.error('  Daftar versi: https://github.com/wppconnect-team/wa-version/tree/main/html');
+        if (this.webVersion) {
+          // Sudah dipatok: menyuruh memasang pin lagi jelas keliru.
+          logger.error(`  WA_WEB_VERSION sudah disematkan (${this.webVersion}).`);
+          logger.error('  Justru pin inilah tersangka utamanya - build lama ditolak WhatsApp.');
+          logger.error('  Beri tanda # pada baris WA_WEB_VERSION di .env lalu jalankan ulang.');
+        } else {
+          logger.error('  Halaman tidak pernah selesai dimuat. Dua kemungkinan:');
+          logger.error(`   • sinkronisasi memang lama - naikkan WA_READY_TIMEOUT_MS (kini ${detik} detik);`);
+          logger.error('   • build WhatsApp Web tidak cocok - sematkan build lama di .env:');
+          logger.error('       WA_WEB_VERSION=2.3000.1015901307');
+          logger.error('     Daftar versi: https://github.com/wppconnect-team/wa-version/tree/main/html');
+        }
         logger.error('');
       }
       // Tahapnya ikut dikirim: 'qr' dan 'authenticated' adalah dua

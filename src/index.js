@@ -134,9 +134,25 @@ async function main() {
         + 'buka WhatsApp di HP > Perangkat Tertaut > Tautkan Perangkat, lalu pindai. '
         + 'QR kedaluwarsa cepat; kalau sudah pudar, tunggu QR berikutnya.';
     } else if (tahap === 'authenticated') {
-      sebab = 'Sesi sudah sah tetapi halaman WhatsApp Web tidak pernah selesai dimuat. '
-        + 'Ini hampir selalu ketidakcocokan build WhatsApp Web dengan whatsapp-web.js. '
-        + 'Setel WA_WEB_VERSION di .env lalu jalankan ulang - lihat README bab 13.';
+      // PENTING: sarannya berlawanan arah tergantung WA_WEB_VERSION sudah
+      // disematkan atau belum. Pesan lama selalu menyuruh MENYETEL, padahal
+      // kalau sudah disetel justru pin itulah tersangka utamanya - build yang
+      // dipatok lama-lama ditolak WhatsApp dan halaman tidak pernah selesai.
+      const detik = Math.round((config.whatsapp.readyTimeoutMs || 0) / 1000);
+      sebab = 'Sesi sudah sah (QR tidak perlu diulang) tetapi halaman WhatsApp Web '
+        + `tidak pernah selesai dimuat dalam ${detik} detik.\n\n`;
+      if (config.whatsapp.webVersion) {
+        sebab += `WA_WEB_VERSION SUDAH disematkan (${config.whatsapp.webVersion}). `
+          + 'Build yang dipatok itu tersangka utamanya: WhatsApp menolak build lama '
+          + 'sehingga halaman menggantung. Beri tanda # pada baris WA_WEB_VERSION di '
+          + '.env (jangan diganti versi lain dulu), lalu jalankan ulang.';
+      } else {
+        sebab += 'WA_WEB_VERSION belum disematkan. Dua kemungkinan: (a) sinkronisasi '
+          + 'riwayat memang lama karena folder sesi besar - naikkan '
+          + 'WA_READY_TIMEOUT_MS=300000 di .env; (b) build WhatsApp Web tidak cocok - '
+          + 'sematkan WA_WEB_VERSION, lihat README bab 13. Coba (a) lebih dulu.';
+      }
+      sebab += ' Diagnosa lengkap: npm run wa:diag';
     } else {
       sebab = `Macet di tahap "${tahap}". Periksa log aplikasi; bila tertulis `
         + '"The browser is already running", ada proses Chrome lama yang masih '
