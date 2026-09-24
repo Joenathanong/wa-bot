@@ -548,7 +548,31 @@ class TelegramService {
           }
 
           if (cmd === '/lockgroup') {
-            await this.bot.sendMessage(chatId, `Tersimpan. ${this.lock.setOpsi('groups', arg)}`);
+            // Argumen kosong DULU langsung mengosongkan setelan - terlalu mudah
+            // tidak sengaja mematikan peringatan. Sekarang kosong = tampilkan
+            // bantuan; mengosongkan harus disengaja dengan kata "hapus".
+            if (!arg) {
+              const sekarang = this.lock.opsi().groupIds;
+              await this.bot.sendMessage(chatId, [
+                '📌 GROUP TUJUAN PERINGATAN LOCK STOCK',
+                '',
+                sekarang.length
+                  ? `Sekarang: ${sekarang.join(', ')}`
+                  : 'Sekarang: BELUM DISETEL - peringatan tidak akan terkirim.',
+                '',
+                'Cara isi (nama group atau JID):',
+                '  /lockgroup Nama Group Lock Stock',
+                '  /lockgroup 6281234567890-1600000000@g.us',
+                '',
+                'Daftar group beserta JID-nya ada di /groups.',
+                'Group ini HARUS berbeda dari group Forwarder Telegram.',
+                '',
+                'Untuk mengosongkan dengan sengaja: /lockgroup hapus',
+              ].join('\n'));
+              return true;
+            }
+            const isi = /^(hapus|kosong|kosongkan|clear)$/i.test(arg) ? '' : arg;
+            await this.bot.sendMessage(chatId, `Tersimpan. ${this.lock.setOpsi('groups', isi)}`);
             return true;
           }
 
