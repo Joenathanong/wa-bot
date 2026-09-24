@@ -3019,7 +3019,9 @@ async function run() {
         timeoutMs: 20000, tzOffsetMinutes: 420, tzLabel: 'WIB' },
       lock: {
         enabled: true, intervalMinutes: 60, jitterMinutes: 7, activeHours: null,
-        groupIds: [], shops: ['NCO', 'Hanasui', 'FYNE', 'EOMMA'],
+        // Lock stock TIDAK lagi mewarisi group Forwarder, jadi tujuannya
+        // harus disebut - sama seperti yang dituntut di dunia nyata.
+        groupIds: ['123@g.us'], shops: ['NCO', 'Hanasui', 'FYNE', 'EOMMA'],
         hanyaAktif: true, kategori: '', area: '', rackCacheMinutes: 180,
         onlyOnChange: false, monospace: true, maxSku: 34, maxBaris: 40, ...extra,
       },
@@ -3633,6 +3635,69 @@ async function run() {
     const hasil = await s.runOnce({ paksa: true });
     assert.strictEqual(hasil.status, 'failed');
     assert.ok(/WhatsApp belum tersambung/.test(hasil.reason));
+  });
+
+  /* --- pemisahan dari Forwarder Telegram --- */
+
+  await test('group lock KOSONG tidak lagi diam-diam memakai group Forwarder', async () => {
+    const terkirim = [];
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => { terkirim.push(1); } },
+      config: lockConfigPalsu({ groupIds: [] }), client: clientLockPalsu(),
+    });
+    assert.deepStrictEqual(s.targetGroups(), [],
+      'kosong harus berarti TIDAK ADA tujuan, bukan semua group aktif');
+    const hasil = await s.runOnce({ paksa: true });
+    assert.strictEqual(hasil.status, 'failed');
+    assert.ok(/BELUM DISETEL/.test(hasil.reason), hasil.reason);
+    assert.ok(/lockgroup/.test(hasil.reason), 'sebutkan cara memperbaikinya');
+    assert.strictEqual(terkirim.length, 0, 'tidak boleh terkirim ke group Forwarder');
+  });
+
+  await test('group lock yang juga AKTIF untuk Forwarder terdeteksi bentrok', async () => {
+    const db = dbPalsu();
+    db.listActiveWaGroups = () => [{ group_id: 'dipakai@g.us', name: 'GABUNGAN' }];
+    db.listWaGroups = () => [{ group_id: 'dipakai@g.us', name: 'GABUNGAN' }];
+    const peringatan = [];
+    const s = new LockScheduler({
+      db, queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: lockConfigPalsu({ groupIds: ['dipakai@g.us'] }), client: clientLockPalsu(),
+      notifyAdmins: (t) => peringatan.push(t),
+    });
+    assert.strictEqual(s.groupBentrokForwarder().length, 1);
+    await s.runOnce({ paksa: true });
+    assert.ok(peringatan.some((t) => /DUA jalur/.test(t)),
+      'admin harus diberi tahu kedua jalur bercampur');
+    assert.ok(/juga aktif untuk Forwarder/.test(s.ringkasanStatus()), s.ringkasanStatus());
+  });
+
+  await test('group lock yang TIDAK aktif untuk Forwarder dinyatakan terpisah', () => {
+    const db = dbPalsu();
+    db.listActiveWaGroups = () => [{ group_id: 'forward@g.us', name: 'FORWARD' }];
+    db.listWaGroups = () => [
+      { group_id: 'forward@g.us', name: 'FORWARD' },
+      { group_id: 'khusus@g.us', name: 'LOCK SAJA' },
+    ];
+    const s = new LockScheduler({
+      db, queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: lockConfigPalsu({ groupIds: ['khusus@g.us'] }), client: clientLockPalsu(),
+    });
+    assert.deepStrictEqual(s.groupBentrokForwarder(), []);
+    assert.ok(/Terpisah dari Forwarder Telegram: ya/.test(s.ringkasanStatus()));
+  });
+
+  await test('/lockstatus mengatakan terus terang bila tujuan belum disetel', () => {
+    const s = new LockScheduler({
+      db: dbPalsu(), queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: lockConfigPalsu({ groupIds: [] }), client: clientLockPalsu(),
+    });
+    const teks = s.ringkasanStatus();
+    assert.ok(/BELUM DISETEL/.test(teks), teks);
+    assert.ok(/lockgroup/.test(teks));
   });
 
   await test('pengambilan lock stock tetap hanya membaca (GET)', () => {

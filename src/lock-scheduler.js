@@ -221,7 +221,10 @@ class LockScheduler {
     if (nama === 'groups') {
       const daftar = String(nilai || '').split(',').map((s) => s.trim()).filter(Boolean);
       this.db.setSetting(KUNCI.groups, daftar.join(','));
-      return daftar.length === 0 ? 'Group tujuan: SEMUA group aktif' : `Group tujuan: ${daftar.join(', ')}`;
+      return daftar.length === 0
+        ? 'Group tujuan DIKOSONGKAN - peringatan lock stock tidak akan terkirim '
+          + 'sampai diisi lagi. Peringatan ini tidak memakai group Forwarder.'
+        : `Group tujuan: ${daftar.join(', ')}`;
     }
     if (nama === 'onlyOnChange') {
       const on = /^(1|true|on|ya)$/i.test(String(nilai).trim());
@@ -470,11 +473,26 @@ class LockScheduler {
     return pesan;
   }
 
+  /**
+   * Group tujuan peringatan lock stock.
+   *
+   * TIDAK ADA LAGI "jatuh ke semua group aktif" bila belum disetel.
+   *
+   * Dulu, lock_groups yang kosong berarti memakai db.listActiveWaGroups() -
+   * DAFTAR YANG SAMA PERSIS dengan tujuan Forwarder Telegram. Akibatnya dua
+   * jalur yang seharusnya terpisah diam-diam menumpuk di group yang sama,
+   * dan tidak ada satu pun tanda bahwa itu terjadi. Saluran peringatan yang
+   * punya PIC sendiri harus DISEBUT, bukan diwarisi.
+   *
+   * Sekarang: kosong = tidak ada tujuan, dan kirim() menolak dengan pesan
+   * yang menyebutkan cara menyetelnya.
+   */
   targetGroups() {
     const pilihan = this.opsi().groupIds;
-    if (pilihan.length === 0) {
-      return this.db.listActiveWaGroups().map((g) => ({ id: g.group_id, name: g.name || g.group_id }));
-    }
+    this._groupTidakDikenal = [];
+    this._groupBelumDisetel = pilihan.length === 0;
+    if (this._groupBelumDisetel) return [];
+
     const semua = this.db.listWaGroups().map((g) => ({ id: g.group_id, name: g.name || g.group_id }));
     const hasil = [];
     const tidakDikenal = [];
@@ -488,6 +506,19 @@ class LockScheduler {
     return hasil;
   }
 
+  /**
+   * Group tujuan lock yang JUGA menerima forward Telegram.
+   *
+   * Forwarder mengirim ke seluruh group berstatus AKTIF di /groups. Jadi
+   * begitu group tujuan lock ikut aktif, kedua jalur menumpuk di sana lagi -
+   * meski lock_groups sudah diisi. Fungsi ini yang membuat keadaan itu
+   * kelihatan, bukan dibiarkan senyap.
+   */
+  groupBentrokForwarder() {
+    const aktif = this.db.listActiveWaGroups().map((g) => String(g.group_id));
+    return this.targetGroups().filter((g) => aktif.includes(String(g.id)));
+  }
+
   async kirim(pesan) {
     const groups = this.targetGroups();
     if (groups.length === 0) {
@@ -495,9 +526,28 @@ class LockScheduler {
         throw new Error(`tujuan tidak dikenal: ${this._groupTidakDikenal.join(', ')}. `
           + 'Isi dengan JID (contoh 1203...@g.us) atau nama group yang terdaftar di /groups.');
       }
-      throw new Error('belum ada WhatsApp Group aktif (buka /groups)');
+      throw new Error(
+        'group tujuan lock stock BELUM DISETEL. Peringatan ini sengaja tidak '
+        + 'memakai group Forwarder Telegram supaya dua jalur tidak menumpuk. '
+        + 'Setel dengan: /lockgroup <JID atau nama group>'
+      );
     }
     if (!this.wa.isReady()) throw new Error('WhatsApp belum tersambung');
+
+    const bentrok = this.groupBentrokForwarder();
+    if (bentrok.length > 0) {
+      const nama = bentrok.map((g) => g.name).join(', ');
+      logger.warn(
+        `Group "${nama}" juga AKTIF untuk Forwarder Telegram - peringatan lock dan `
+        + 'forward stok akan bercampur di sana. Matikan tombolnya (jadikan tidak aktif) '
+        + 'di /groups agar group ini khusus lock stock.'
+      );
+      this._notify(
+        `Group "${nama}" menerima DUA jalur sekaligus: peringatan lock stock dan forward `
+        + 'Telegram. Buka /groups lalu matikan status aktifnya bila ingin group ini '
+        + 'khusus lock stock.'
+      );
+    }
 
     let terkirim = 0;
     const gagal = [];
@@ -536,7 +586,17 @@ class LockScheduler {
     B.push(`Lock stock: ${this.enabled() ? 'AKTIF' : 'MATI'}`);
     B.push(`Jeda: ${o.intervalMinutes} menit, acak +/- ${o.jitterMinutes} menit`);
     B.push(o.activeHours ? `Jam aktif: ${o.activeHours.mulai}:00-${o.activeHours.sampai}:00` : 'Jam aktif: 24 jam');
-    B.push(`Group tujuan: ${o.groupIds.length === 0 ? 'semua group aktif' : o.groupIds.join(', ')}`);
+    if (o.groupIds.length === 0) {
+      B.push('Group tujuan: BELUM DISETEL - tidak akan terkirim (/lockgroup)');
+    } else {
+      B.push(`Group tujuan: ${o.groupIds.join(', ')}`);
+      let bentrok = [];
+      try { bentrok = this.groupBentrokForwarder(); } catch (e) { /* db belum siap */ }
+      B.push(bentrok.length > 0
+        ? `  PERHATIAN: ${bentrok.map((g) => g.name).join(', ')} juga aktif untuk Forwarder `
+          + '- kedua jalur bercampur di sana'
+        : '  Terpisah dari Forwarder Telegram: ya');
+    }
     B.push(`Ulangi pesan yang sama: ${o.onlyOnChange ? 'TIDAK (hanya bila berubah)' : 'ya, tiap putaran'}`);
     B.push('');
     B.push('PIC per shop:');

@@ -2007,8 +2007,65 @@ Cek hasilnya kapan saja dengan `/lockstatus`.
 | `/lockpic <Shop> <Nama>` | Nama PIC. Boleh lebih dari satu, pisah koma |
 | `/lockwa <Shop> <Nomor>` | Nomor PIC untuk mention, urut sesuai namanya |
 | `/lockjeda 60 7` | Jeda 60 menit, digeser acak +/- 7 menit |
-| `/lockgroup <JID atau nama>` | Group tujuan. Kosongkan = semua group aktif |
+| `/lockgroup <JID atau nama>` | Group tujuan. **Wajib diisi** - lihat 23.5b |
 | `/lockulang on\|off` | `off` = jangan ulangi pesan yang isinya sama persis |
+
+### 23.5b Group tujuan wajib terpisah dari Forwarder
+
+Forwarder Telegram (bab 1-10) mengirim ke **seluruh group berstatus AKTIF**
+di `/groups`. Dulu, lock stock dengan `lock_groups` kosong memakai daftar
+yang **sama persis** - sehingga dua jalur yang seharusnya terpisah menumpuk
+di group yang sama tanpa satu pun tanda.
+
+Sekarang tidak lagi. `lock_groups` kosong berarti **tidak ada tujuan**, dan
+peringatan ditolak dengan pesan yang menyebutkan cara menyetelnya:
+
+```
+group tujuan lock stock BELUM DISETEL. Peringatan ini sengaja tidak
+memakai group Forwarder Telegram supaya dua jalur tidak menumpuk.
+Setel dengan: /lockgroup <JID atau nama group>
+```
+
+Saluran peringatan yang punya PIC sendiri harus **disebut**, bukan diwarisi.
+
+**Menyetelnya benar butuh dua langkah**, bukan satu. Mengisi `/lockgroup`
+saja belum cukup: kalau group itu juga berstatus AKTIF di `/groups`,
+Forwarder tetap ikut mengirim ke sana.
+
+```
+/groups                      lihat group terdaftar beserta statusnya
+/lockgroup 1203xxxx@g.us     tetapkan tujuan lock stock
+```
+
+lalu di `/groups`, **matikan status aktif** group tersebut (⚪). Group yang
+tidak aktif tetap bisa menerima lock stock - yang dibaca lock adalah
+`lock_groups`, bukan status aktifnya.
+
+Susunan yang benar:
+
+| Group | Status di /groups | Menerima |
+|---|---|---|
+| DAILY E-COMMERCE | 🟢 aktif | Forward Telegram |
+| LOCK STOCK | ⚪ tidak aktif, terdaftar di `/lockgroup` | Peringatan lock stock |
+
+**Bot memeriksanya sendiri.** Bila group tujuan lock ternyata juga aktif
+untuk Forwarder, admin langsung diberi tahu dan `/lockstatus` menandainya:
+
+```
+Group tujuan: LOCK STOCK
+  PERHATIAN: LOCK STOCK juga aktif untuk Forwarder - kedua jalur bercampur di sana
+```
+
+Bila sudah benar terpisah:
+
+```
+Group tujuan: LOCK STOCK
+  Terpisah dari Forwarder Telegram: ya
+```
+
+Aturan yang sama berlaku untuk `/stokgroup` dan `/ocsgroup`, tetapi keduanya
+**masih** memakai perilaku lama (kosong = semua group aktif). Bila Anda ingin
+keduanya ikut dipisah tegas, sampaikan saja.
 
 ### 23.6 Pesan yang sama tiap jam
 

@@ -233,7 +233,7 @@ class TelegramService {
           '/lockpic <Shop> <Nama>  - PIC tiap shop (boleh >1, pisah koma)',
           '/lockwa <Shop> <Nomor>  - nomor PIC agar di-mention (urut, pisah koma)',
           '/lockjeda 60 7    - jeda menit + penyimpangan acak',
-          '/lockgroup        - group WhatsApp tujuan',
+          '/lockgroup        - group tujuan (WAJIB, terpisah dari Forwarder)',
           '/lockulang on|off - ulangi pesan yang sama tiap jam?',
         ];
 
