@@ -113,7 +113,10 @@ const config = {
   // Pengelompokan pesan follow-up: peringatan yang terpecah menjadi beberapa
   // bagian hanya menghasilkan satu pesan mention.
   followUp: {
-    windowMs: Math.max(0, toInt(process.env.FOLLOWUP_WINDOW_MS, 15000)),
+    // 0 = tanpa tunda. Data pesanan datang pada waktu yang sudah acak
+    // dengan sendirinya, jadi penundaan buatan tidak menambah keamanan
+    // akun - hanya membuat peringatan "kurir menunggu" jadi basi.
+    windowMs: Math.max(0, toInt(process.env.FOLLOWUP_WINDOW_MS, 0)),
     maxWaitMs: Math.max(1000, toInt(process.env.FOLLOWUP_MAX_WAIT_MS, 120000)),
   },
 
@@ -291,7 +294,18 @@ const config = {
 
   // Nilai .env dipakai sebagai default awal; nilai aktifnya tersimpan di
   // tabel settings sehingga dapat diubah lewat Admin Menu.
-  messageDelayMs: Math.max(3000, toInt(process.env.MESSAGE_DELAY_MS, 3000)),
+  // Jeda antar pesan WhatsApp. 0 = kirim begitu antrean sampai giliran.
+  // Antrean tetap SERIAL (satu pesan pada satu waktu) apa pun nilainya;
+  // itulah yang mencegah pengiriman tumpang tindih, bukan jedanya.
+  messageDelayMs: Math.max(0, toInt(process.env.MESSAGE_DELAY_MS, 0)),
+
+  // Pemicu forwarding awal. Nilai aktif disimpan di settings (/keyword).
+  forwardKeyword: (process.env.FORWARD_KEYWORD || 'PAKET INSTANT').trim(),
+
+  // gabung = mention ditempel di pesan yang sama (default, 1 notifikasi);
+  // pisah  = mention jadi pesan kedua (perilaku lama);
+  // mati   = tanpa mention. Nilai aktif tersimpan di settings (/mention).
+  mentionMode: (process.env.MENTION_MODE || 'gabung').trim().toLowerCase(),
 
   isAdmin(telegramUserId) {
     return adminIds.includes(String(telegramUserId));

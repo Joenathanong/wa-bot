@@ -1,7 +1,7 @@
 'use strict';
 
 const logger = require('./logger').scope('FLOW');
-const { shouldForward, KEYWORD } = require('./filter');
+const { shouldForward, KEYWORD_DEFAULT } = require('./filter');
 const { renderTemplate } = require('./render');
 
 /**
@@ -34,6 +34,51 @@ class Pipeline {
     this._followUpTimer = null;
   }
 
+  /**
+   * Keyword pemicu yang SEDANG berlaku. Dibaca ulang tiap pesan supaya
+   * perubahan lewat /keyword langsung berlaku tanpa restart.
+   * String kosong berarti sengaja tanpa saringan kata.
+   */
+  keywordAktif() {
+    const tersimpan = this.db.getSetting('forward_keyword', null);
+    if (tersimpan !== null) return String(tersimpan);
+    return this.config.forwardKeyword !== undefined
+      ? String(this.config.forwardKeyword)
+      : KEYWORD_DEFAULT;
+  }
+
+  /**
+   * Cara mention dikirim:
+   *   'gabung' - ditempel di bawah teks pesanan, hanya SATU pesan (default)
+   *   'pisah'  - pesan kedua terpisah (perilaku lama)
+   *   'mati'   - tanpa mention sama sekali
+   */
+  modeMention() {
+    const tersimpan = this.db.getSetting('mention_mode', null);
+    const v = String(tersimpan !== null
+      ? tersimpan
+      : (this.config.mentionMode || 'gabung')).toLowerCase();
+    return ['gabung', 'pisah', 'mati'].includes(v) ? v : 'gabung';
+  }
+
+  /**
+   * Potongan mention siap tempel. Mengembalikan teks kosong bila mention
+   * dimatikan atau template/user belum disiapkan.
+   */
+  _potonganMention() {
+    if (this.modeMention() !== 'gabung') return { teks: '', mentions: [] };
+    const template = this.db.getActiveTemplate();
+    if (!template) return { teks: '', mentions: [] };
+    const users = this.db.listActiveUsers();
+    const rendered = renderTemplate(template.content, users, {
+      mentionDisplay: this.db.getSetting('mention_display', 'number'),
+      count: 1,
+    });
+    const teks = String(rendered.text || '').trim();
+    if (!teks) return { teks: '', mentions: [] };
+    return { teks, mentions: rendered.mentions };
+  }
+
   /** Seluruh WhatsApp Group tujuan yang sedang aktif. */
   targetGroups() {
     return this.db.listActiveWaGroups().map((g) => ({ id: g.group_id, name: g.name || g.group_id }));
@@ -50,7 +95,7 @@ class Pipeline {
     const c = String(chatId);
     const m = String(messageId);
     if (!this.config.isAllowedChat(c)) return false;
-    if (!shouldForward(text || '')) return false;
+    if (!shouldForward(text || '', this.keywordAktif())) return false;
     if (this._inFlight.has(`${c}:${m}`) || this.db.isProcessed(c, m)) return false;
     return true;
   }
@@ -89,7 +134,7 @@ class Pipeline {
     }
 
     // 2 & 3. Ambil teks polos lalu cek keyword
-    if (!shouldForward(text)) {
+    if (!shouldForward(text, this.keywordAktif())) {
       logger.debug(`Diabaikan: keyword tidak ditemukan (chat ${chatId}, msg ${messageId})`);
       this.stats.ignored += 1;
       return { action: 'ignored', reason: 'no_keyword' };
@@ -129,13 +174,18 @@ class Pipeline {
     logger.info(`Keyword cocok - meneruskan pesan Telegram ${messageId} dari chat ${chatId}`);
 
     try {
-      // 5. Pesan 1: teruskan isi asli Telegram apa adanya ke SEMUA group aktif
-      const forwardText = `[FORWARDED FROM TELEGRAM]\n\n${text}`;
+      // 5. Teruskan isi asli Telegram ke SEMUA group aktif.
+      // Header "[FORWARDED FROM TELEGRAM]" dibuang: isi pesan sekarang
+      // adalah perintah kerja operasional, bukan kutipan chat.
+      // Mention ikut DITEMPEL di sini (mode 'gabung') supaya satu pesanan
+      // hanya menghasilkan satu notifikasi di group WhatsApp.
+      const tempel = this._potonganMention();
+      const forwardText = tempel.teks ? `${text}\n\n${tempel.teks}` : text;
       const hasil = [];
       for (const group of groups) {
         try {
           await this.queue.enqueue(
-            () => this.wa.sendText(group.id, forwardText, []),
+            () => this.wa.sendText(group.id, forwardText, tempel.mentions),
             `forward ${messageId} -> ${group.name}`
           );
           hasil.push({ group, ok: true });
@@ -157,10 +207,9 @@ class Pipeline {
         this._notify(`Pesan diteruskan ke ${berhasil.length}/${groups.length} group. Gagal: ${gagal}`);
       }
 
-      // 6-10. Pesan 2: template + REAL WhatsApp mention.
-      // Dijadwalkan, bukan dikirim langsung, agar peringatan yang terpecah
-      // menjadi beberapa bagian hanya menghasilkan SATU pesan mention per group.
-      this._scheduleFollowUp();
+      // 6-10. Pesan kedua berisi mention HANYA pada mode 'pisah'.
+      // Pada mode 'gabung' (default) mention sudah ikut di pesan di atas.
+      if (this.modeMention() === 'pisah') this._scheduleFollowUp();
 
       // 11. Catat sebagai terproses hanya setelah berhasil
       this.db.markProcessed(chatId, messageId);
@@ -271,4 +320,4 @@ class Pipeline {
 }
 
 module.exports = Pipeline;
-module.exports.KEYWORD = KEYWORD;
+module.exports.KEYWORD = KEYWORD_DEFAULT;

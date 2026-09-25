@@ -25,6 +25,12 @@ process.env.ADMIN_TELEGRAM_IDS = '111,222';
 process.env.TELEGRAM_ALLOWED_CHAT_IDS = '-100999';
 process.env.DB_PATH = require('path').join(require('os').tmpdir(), 'telegram-wa-bridge-test.db');
 process.env.MESSAGE_DELAY_MS = '3000';
+// Sebagian besar uji di berkas ini ditulis untuk jalur LAMA: peringatan stok
+// sebagai pemicu, dan mention sebagai pesan KEDUA. Keduanya kini tinggal salah
+// satu mode, jadi dikunci di sini agar uji regresi jalur lama tetap berlaku.
+// Perilaku BARU (PAKET INSTANT + mention menyatu) diuji di bagiannya sendiri.
+process.env.FORWARD_KEYWORD = 'dengan stok tersedia di bawah stok ter-reserve';
+process.env.MENTION_MODE = 'pisah';
 process.env.TELEGRAM_USER_SESSION_FILE = require('path').join(require('os').tmpdir(), 'telegram-wa-bridge-test.session');
 global.__QUIET_QR__ = true;
 
@@ -111,27 +117,65 @@ async function run() {
   section('1. Filter keyword');
   const TELEGRAM_SAMPLE =
     '⚠️ PERINGATAN STOK SHOPEE Ditemukan 110 SKU dengan stok tersedia di bawah stok ter-reserve (Area: Pusat). 🕒 2026-08-21 21:14:43 WIB';
+  // Keyword lama, kini hanya salah satu nilai yang mungkin - dilewatkan eksplisit.
+  const KW_LAMA = 'dengan stok tersedia di bawah stok ter-reserve';
 
-  await test('pesan contoh Shopee diteruskan', () => assert.strictEqual(filter.shouldForward(TELEGRAM_SAMPLE), true));
-  await test('pesan Tokopedia diteruskan', () => assert.strictEqual(filter.shouldForward('PERINGATAN TOKOPEDIA\nDitemukan SKU dengan stok tersedia di bawah stok ter-reserve.'), true));
-  await test('case-insensitive', () => assert.strictEqual(filter.shouldForward('DENGAN STOK TERSEDIA DI BAWAH STOK TER-RESERVE'), true));
-  await test('markdown ** tidak mengganggu', () => assert.strictEqual(filter.shouldForward('**110** SKU dengan stok tersedia di bawah stok ter-reserve'), true));
-  await test('emoji tidak mengganggu', () => assert.strictEqual(filter.shouldForward('🔥🚨 dengan stok tersedia di bawah stok ter-reserve 🚨'), true));
-  await test('keyword terpotong newline tetap terdeteksi', () => assert.strictEqual(filter.shouldForward('... dengan stok tersedia di bawah\nstok ter-reserve ...'), true));
-  await test('"Stock opname selesai." diabaikan', () => assert.strictEqual(filter.shouldForward('Stock opname selesai.'), false));
-  await test('"Stok Shopee normal." diabaikan', () => assert.strictEqual(filter.shouldForward('Stok Shopee normal.'), false));
-  await test('"Stok tersedia di atas stok ter-reserve." diabaikan', () => assert.strictEqual(filter.shouldForward('Stok tersedia di atas stok ter-reserve.'), false));
-  await test('"Stock hampir habis." diabaikan', () => assert.strictEqual(filter.shouldForward('Stock hampir habis.'), false));
+  await test('pesan contoh Shopee diteruskan', () => assert.strictEqual(filter.shouldForward(TELEGRAM_SAMPLE, KW_LAMA), true));
+  await test('pesan Tokopedia diteruskan', () => assert.strictEqual(filter.shouldForward('PERINGATAN TOKOPEDIA\nDitemukan SKU dengan stok tersedia di bawah stok ter-reserve.', KW_LAMA), true));
+  await test('case-insensitive', () => assert.strictEqual(filter.shouldForward('DENGAN STOK TERSEDIA DI BAWAH STOK TER-RESERVE', KW_LAMA), true));
+  await test('markdown ** tidak mengganggu', () => assert.strictEqual(filter.shouldForward('**110** SKU dengan stok tersedia di bawah stok ter-reserve', KW_LAMA), true));
+  await test('emoji tidak mengganggu', () => assert.strictEqual(filter.shouldForward('🔥🚨 dengan stok tersedia di bawah stok ter-reserve 🚨', KW_LAMA), true));
+  await test('keyword terpotong newline tetap terdeteksi', () => assert.strictEqual(filter.shouldForward('... dengan stok tersedia di bawah\nstok ter-reserve ...', KW_LAMA), true));
+  await test('"Stock opname selesai." diabaikan', () => assert.strictEqual(filter.shouldForward('Stock opname selesai.', KW_LAMA), false));
+  await test('"Stok Shopee normal." diabaikan', () => assert.strictEqual(filter.shouldForward('Stok Shopee normal.', KW_LAMA), false));
+  await test('"Stok tersedia di atas stok ter-reserve." diabaikan', () => assert.strictEqual(filter.shouldForward('Stok tersedia di atas stok ter-reserve.', KW_LAMA), false));
+  await test('"Stock hampir habis." diabaikan', () => assert.strictEqual(filter.shouldForward('Stock hampir habis.', KW_LAMA), false));
   await test('input kosong/null aman', () => {
-    assert.strictEqual(filter.shouldForward(''), false);
-    assert.strictEqual(filter.shouldForward(null), false);
-    assert.strictEqual(filter.shouldForward(undefined), false);
-    assert.strictEqual(filter.shouldForward(12345), false);
+    assert.strictEqual(filter.shouldForward('', KW_LAMA), false);
+    assert.strictEqual(filter.shouldForward(null, KW_LAMA), false);
+    assert.strictEqual(filter.shouldForward(undefined, KW_LAMA), false);
+    assert.strictEqual(filter.shouldForward(12345, KW_LAMA), false);
   });
-  await test('hanya SATU keyword yang dipakai', () => {
-    assert.strictEqual(filter.KEYWORD, 'dengan stok tersedia di bawah stok ter-reserve');
+
+  /* --- pemicu yang dapat diganti (menu 1 dialihkan ke data pesanan) --- */
+  const PESANAN_SAMPLE = [
+    '🛵 PAKET INSTANT — SEGERA DISERAHKAN',
+    '25/09/2026 08:02 WIB',
+    '',
+    '1. 4GKX — SPX Instan',
+    '   Tahap:  belum terdaftar di gudang (± 29 mnt lagi)',
+    '   Rak: - · Estimasi serah: 08:31',
+    '',
+    'Kurir sudah menunggu di lokasi. Mohon segera diproses.',
+  ].join('\n');
+
+  await test('default pemicu sekarang PAKET INSTANT', () => {
+    assert.strictEqual(filter.KEYWORD_DEFAULT, 'PAKET INSTANT');
+    assert.strictEqual(filter.shouldForward(PESANAN_SAMPLE), true);
+  });
+  await test('pesanan tidak lolos keyword stok lama', () => {
+    assert.strictEqual(filter.shouldForward(PESANAN_SAMPLE, KW_LAMA), false);
+  });
+  await test('keyword pesanan case-insensitive & tahan em-dash', () => {
+    assert.strictEqual(filter.shouldForward('paket instant segera diserahkan', 'PAKET INSTANT'), true);
+  });
+  await test('obrolan biasa tidak ikut terkirim', () => {
+    assert.strictEqual(filter.shouldForward('Pak, paketnya sudah diambil ya', 'PAKET INSTANT'), false);
+  });
+  await test('keyword kosong = teruskan semua (disengaja lewat /keyword semua)', () => {
+    assert.strictEqual(filter.shouldForward('apa saja', ''), true);
+    assert.strictEqual(filter.shouldForward('apa saja', '   '), true);
+    assert.strictEqual(filter.shouldForward('', ''), false, 'pesan kosong tetap bukan pesan');
+  });
+  await test('keyword yang mengandung newline tetap cocok', () => {
+    assert.strictEqual(filter.shouldForward('PAKET   INSTANT — SEGERA', 'PAKET INSTANT'), true);
+  });
+
+  await test('hanya SATU nilai default keyword di dalam kode', () => {
+    assert.strictEqual(filter.KEYWORD, filter.KEYWORD_DEFAULT);
     const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'filter.js'), 'utf8');
-    assert.strictEqual((src.match(/KEYWORD = /g) || []).length, 1);
+    assert.strictEqual((src.match(/KEYWORD_DEFAULT = /g) || []).length, 1,
+      'daftar keyword tidak boleh beranak di filter.js');
   });
 
   /* --------------------------- VALIDASI --------------------------- */
@@ -471,7 +515,7 @@ async function run() {
     await send(TELEGRAM_SAMPLE, ADMIN, SOURCE_CHAT, 8801);
     await settle();
     const sent = waSent();
-    const forwards = sent.filter((m) => m.text.startsWith('[FORWARDED'));
+    const forwards = sent.filter((m) => (m.mentions || []).length === 0);
     const mentions = sent.filter((m) => m.mentions.length > 0);
     assert.strictEqual(forwards.length, 2, 'satu forward per group');
     assert.strictEqual(mentions.length, 2, 'satu mention per group');
@@ -485,7 +529,7 @@ async function run() {
     await send('(bagian 2/2) dengan stok tersedia di bawah stok ter-reserve', ADMIN, SOURCE_CHAT, 8812);
     await settle();
     const sent = waSent();
-    assert.strictEqual(sent.filter((m) => m.text.startsWith('[FORWARDED')).length, 4, '2 bagian x 2 group');
+    assert.strictEqual(sent.filter((m) => (m.mentions || []).length === 0).length, 4, '2 bagian x 2 group');
     assert.strictEqual(sent.filter((m) => m.mentions.length > 0).length, 2, '1 mention x 2 group');
   });
 
@@ -548,7 +592,8 @@ async function run() {
     await settle();
     const sent = waSent();
     assert.strictEqual(sent.length, 2, `harus 2 pesan, dapat ${sent.length}`);
-    assert.ok(sent[0].text.startsWith('[FORWARDED FROM TELEGRAM]'));
+    assert.ok(!sent[0].text.startsWith('['), 'tidak ada lagi header [FORWARDED FROM TELEGRAM]');
+    assert.ok(sent[0].text.startsWith('⚠️ PERINGATAN'), 'pesan diteruskan apa adanya');
     assert.ok(sent[0].text.includes('110 SKU'), 'isi asli Telegram harus utuh');
     assert.strictEqual(sent[0].chatId, '120363011111111111@g.us');
     assert.strictEqual(sent[0].mentions.length, 0);
@@ -704,7 +749,7 @@ async function run() {
     await click('x:sim');
     await settle();
     assert.strictEqual(waSent().length, 2);
-    assert.ok(waSent()[0].text.includes('[FORWARDED FROM TELEGRAM]'));
+    assert.strictEqual(waSent()[0].mentions.length, 0, 'pesan pertama = teruskan apa adanya');
   });
 
   /* ---- status & pengaturan ---- */
@@ -732,7 +777,9 @@ async function run() {
     const t = bot.allText();
     assert.ok(!t.includes(process.env.TELEGRAM_BOT_TOKEN), 'TOKEN BOCOR!');
     assert.ok(t.includes('••'), 'token harus disamarkan');
-    assert.ok(t.includes('dengan stok tersedia di bawah stok ter-reserve'));
+    assert.ok(t.includes('dengan stok tersedia di bawah stok ter-reserve'),
+      'pemicu aktif harus ikut ditampilkan');
+    assert.ok(t.includes('Mention: pisah'), 'mode mention ikut ditampilkan');
   });
 
   bot.clear();
@@ -746,9 +793,13 @@ async function run() {
   await test('ubah Message Delay lewat menu', async () => {
     await click('s:delay');
     bot.clear();
-    await send('1000');
-    assert.ok(bot.allText().includes('3000 - 600000'), 'nilai < 3000 harus ditolak');
+    await send('-5');
+    assert.ok(bot.allText().includes('0 - 600000'), 'nilai negatif harus ditolak');
     bot.clear();
+    await send('0');
+    assert.strictEqual(queue.delayMs, 0, '0 ms harus diterima apa adanya - bukan dipaksa ke 3000');
+    bot.clear();
+    await click('s:delay');          // prompt selesai setelah nilai sah diterima
     await send('4500');
     assert.strictEqual(queue.delayMs, 4500);
     assert.strictEqual(idb.getSetting('message_delay_ms'), '4500');
@@ -836,7 +887,7 @@ async function run() {
     await send(BAGIAN_2, ADMIN, SOURCE_CHAT, 8102);
     await settle();
     const sent = waSent();
-    const forwards = sent.filter((m) => m.text.startsWith('[FORWARDED FROM TELEGRAM]'));
+    const forwards = sent.filter((m) => (m.mentions || []).length === 0);
     const mentions = sent.filter((m) => m.mentions && m.mentions.length > 0);
     assert.strictEqual(forwards.length, 2, 'kedua bagian harus tetap diteruskan');
     assert.strictEqual(mentions.length, 1, `pesan mention harus SATU, dapat ${mentions.length}`);
@@ -856,7 +907,7 @@ async function run() {
     }
     await settle();
     const mentions = waSent().filter((m) => m.mentions && m.mentions.length > 0);
-    assert.strictEqual(waSent().filter((m) => m.text.startsWith('[FORWARDED')).length, 4);
+    assert.strictEqual(waSent().filter((m) => (m.mentions || []).length === 0).length, 4);
     assert.strictEqual(mentions.length, 1);
   });
 
@@ -1563,7 +1614,7 @@ async function run() {
     });
     await settle();
     assert.strictEqual(waSent().length, 2);
-    assert.ok(waSent()[0].text.includes('[FORWARDED FROM TELEGRAM]'));
+    assert.strictEqual(waSent()[0].mentions.length, 0, 'pesan pertama = teruskan apa adanya');
     assert.strictEqual(waSent()[1].mentions.length, 2);
   });
 
@@ -1788,7 +1839,7 @@ async function run() {
 
   /* ---- setelah mati listrik: hanya peringatan TERAKHIR yang dikirim ---- */
 
-  const diteruskan = () => waSent().filter((m) => String(m.text).includes('[FORWARDED FROM TELEGRAM]'));
+  const diteruskan = () => waSent().filter((m) => (m.mentions || []).length === 0);
 
   await test('susulan hanya mengirim peringatan TERAKHIR yang belum terkirim', async () => {
     gram.__state().history = [
@@ -3705,6 +3756,149 @@ async function run() {
     const potong = kode.slice(kode.indexOf('fetchUnderReserve'));
     assert.ok(!/_request\('(POST|PUT|DELETE|PATCH)'/.test(potong),
       'bagian lock stock tidak boleh menulis apa pun ke OCS');
+  });
+
+  /* ============ 13. Forwarder data pesanan (menu 1 dialihkan) ======= */
+  section('13. Forwarder data pesanan - mention menyatu, tanpa tunda');
+
+  const PESANAN = [
+    '🛵 PAKET INSTANT — SEGERA DISERAHKAN',
+    '25/09/2026 08:02 WIB',
+    '',
+    '1. 4GKX — SPX Instan',
+    '   Tahap:  belum terdaftar di gudang (± 29 mnt lagi)',
+    '   Rak: - · Estimasi serah: 08:31',
+    '',
+    'Kurir sudah menunggu di lokasi. Mohon segera diproses.',
+  ].join('\n');
+
+  function pesananSetup(setting = {}) {
+    const store = { ...setting };
+    const diproses = new Set();
+    const terkirim = [];
+    const db = {
+      listActiveWaGroups: () => [{ group_id: 'G1@g.us', name: 'INSTANT OPS' }],
+      getSetting: (k, d = null) => (k in store ? store[k] : d),
+      setSetting: (k, v) => { store[k] = String(v); },
+      isProcessed: (c, m) => diproses.has(`${c}:${m}`),
+      markProcessed: (c, m) => diproses.add(`${c}:${m}`),
+      getActiveTemplate: () => ({ content: 'Dear {users}, mohon diproses.' }),
+      listActiveUsers: () => [{ name: 'Ibu Manda', whatsapp_number: '6281234567890' }],
+    };
+    const cfg = {
+      isAllowedChat: () => true,
+      forwardKeyword: 'PAKET INSTANT',
+      mentionMode: 'gabung',
+      followUp: { windowMs: 0, maxWaitMs: 1000 },
+    };
+    const wa = {
+      isReady: () => true,
+      sendText: async (gid, teks, mentions) => { terkirim.push({ gid, teks, mentions: mentions || [] }); },
+    };
+    const pipe = new Pipeline({
+      db, whatsapp: wa, queue: new Queue({ delayMs: 0 }), config: cfg,
+    });
+    return { pipe, terkirim, store };
+  }
+
+  await test('pesanan PAKET INSTANT diteruskan sebagai SATU pesan', async () => {
+    const { pipe, terkirim } = pesananSetup();
+    const hasil = await pipe.handle({ chatId: '-1', messageId: '1', text: PESANAN });
+    assert.strictEqual(hasil.action, 'forwarded');
+    assert.strictEqual(terkirim.length, 1, 'satu pesanan = satu pesan WhatsApp');
+  });
+
+  await test('teks asli utuh, tanpa header [FORWARDED FROM TELEGRAM]', async () => {
+    const { pipe, terkirim } = pesananSetup();
+    await pipe.handle({ chatId: '-1', messageId: '2', text: PESANAN });
+    const t = terkirim[0].teks;
+    assert.ok(!t.includes('[FORWARDED'), 'header tidak boleh muncul lagi');
+    assert.ok(t.startsWith('🛵 PAKET INSTANT'), 'pesan dimulai persis seperti aslinya');
+    assert.ok(t.includes('Estimasi serah: 08:31'), 'seluruh baris ikut terkirim');
+    assert.ok(t.includes('Kurir sudah menunggu'), 'penutup ikut terkirim');
+  });
+
+  await test('mention menempel di bawah teks pesanan, bukan pesan kedua', async () => {
+    const { pipe, terkirim } = pesananSetup();
+    await pipe.handle({ chatId: '-1', messageId: '3', text: PESANAN });
+    const { teks, mentions } = terkirim[0];
+    assert.ok(teks.includes('@6281234567890'), 'REAL mention butuh @nomor di dalam teks');
+    assert.deepStrictEqual(mentions, ['6281234567890@c.us'], 'JID ikut dikirim');
+    const posisiMention = teks.indexOf('Dear @');
+    assert.ok(posisiMention > teks.indexOf('Kurir sudah menunggu'), 'mention berada di bagian bawah');
+  });
+
+  await test('mode mati = tanpa mention sama sekali', async () => {
+    const { pipe, terkirim } = pesananSetup({ mention_mode: 'mati' });
+    await pipe.handle({ chatId: '-1', messageId: '4', text: PESANAN });
+    assert.strictEqual(terkirim.length, 1);
+    assert.deepStrictEqual(terkirim[0].mentions, []);
+    assert.ok(!terkirim[0].teks.includes('Dear @'));
+  });
+
+  await test('mode pisah mengembalikan pesan kedua', async () => {
+    const { pipe, terkirim } = pesananSetup({ mention_mode: 'pisah' });
+    await pipe.handle({ chatId: '-1', messageId: '5', text: PESANAN });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.strictEqual(terkirim.length, 2, 'forward + mention terpisah');
+    assert.deepStrictEqual(terkirim[0].mentions, [], 'pesan pertama tanpa mention');
+    assert.ok(terkirim[1].mentions.length > 0, 'pesan kedua membawa mention');
+  });
+
+  await test('pesan bukan pesanan diabaikan', async () => {
+    const { pipe, terkirim } = pesananSetup();
+    const hasil = await pipe.handle({ chatId: '-1', messageId: '6', text: 'Pagi semua, absen dulu ya' });
+    assert.strictEqual(hasil.action, 'ignored');
+    assert.strictEqual(hasil.reason, 'no_keyword');
+    assert.strictEqual(terkirim.length, 0);
+  });
+
+  await test('/keyword mengganti pemicu tanpa restart', async () => {
+    const { pipe, terkirim, store } = pesananSetup();
+    assert.strictEqual(pipe.keywordAktif(), 'PAKET INSTANT');
+    store.forward_keyword = 'SEGERA DISERAHKAN';
+    assert.strictEqual(pipe.keywordAktif(), 'SEGERA DISERAHKAN');
+    await pipe.handle({ chatId: '-1', messageId: '7', text: PESANAN });
+    assert.strictEqual(terkirim.length, 1, 'keyword baru langsung berlaku');
+    const lain = await pipe.handle({ chatId: '-1', messageId: '8', text: 'PAKET INSTANT tanpa kata kunci baru' });
+    assert.strictEqual(lain.action, 'ignored', 'keyword lama tidak berlaku lagi');
+  });
+
+  await test('/keyword semua = tanpa saringan kata', async () => {
+    const { pipe, terkirim } = pesananSetup({ forward_keyword: '' });
+    assert.strictEqual(pipe.keywordAktif(), '');
+    await pipe.handle({ chatId: '-1', messageId: '9', text: 'obrolan biasa' });
+    assert.strictEqual(terkirim.length, 1, 'semua pesan ikut diteruskan');
+  });
+
+  await test('duplikat tetap ditolak sekali kirim', async () => {
+    const { pipe, terkirim } = pesananSetup();
+    await pipe.handle({ chatId: '-1', messageId: '10', text: PESANAN });
+    const ulang = await pipe.handle({ chatId: '-1', messageId: '10', text: PESANAN });
+    assert.strictEqual(ulang.action, 'duplicate');
+    assert.strictEqual(terkirim.length, 1);
+  });
+
+  await test('tidak ada penundaan buatan pada jalur pesanan', async () => {
+    const { pipe, terkirim } = pesananSetup();
+    const mulai = Date.now();
+    await pipe.handle({ chatId: '-1', messageId: '11', text: PESANAN });
+    await pipe.handle({ chatId: '-1', messageId: '12', text: PESANAN });
+    const lama = Date.now() - mulai;
+    assert.strictEqual(terkirim.length, 2);
+    assert.ok(lama < 500, `dua pesanan berturut-turut harus langsung terkirim, butuh ${lama} ms`);
+  });
+
+  await test('default aplikasi: jeda 0 ms dan jendela follow-up 0', () => {
+    assert.strictEqual(config.messageDelayMs >= 0, true);
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'config.js'), 'utf8');
+    assert.ok(/FOLLOWUP_WINDOW_MS, 0\)/.test(src), 'jendela follow-up default harus 0');
+    assert.ok(/MESSAGE_DELAY_MS, 0\)/.test(src), 'jeda antar pesan default harus 0');
+    assert.ok(!/Math\.max\(3000, toInt\(process\.env\.MESSAGE_DELAY_MS/.test(src),
+      'jeda antar pesan tidak boleh lagi dipaksa minimal 3000 ms');
+    const isrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
+    assert.ok(!/Math\.max\(3000, storedDelay/.test(isrc),
+      'index.js tidak boleh lagi memaksa jeda minimal 3000 ms saat start');
   });
 
   /* ------------------------------ hasil --------------------------- */

@@ -1,7 +1,6 @@
 'use strict';
 
 const logger = require('./logger').scope('TG');
-const { KEYWORD } = require('./filter');
 
 /**
  * Lapisan Telegram: polling, perintah, routing ke Admin Menu dan Pipeline.
@@ -186,9 +185,10 @@ class TelegramService {
         const forwarder = [
           '',
           '*1. FORWARDER TELEGRAM -> WHATSAPP*',
-          '_Meneruskan peringatan stok dari grup Telegram, lalu mengirim_',
-          '_pesan follow-up dengan mention ke user yang terdaftar._',
-          '/keyword - lihat keyword pemicu forwarding',
+          '_Meneruskan data pesanan dari grup Telegram apa adanya,_',
+          '_dengan mention PIC ditempel di pesan yang sama. Tanpa tunda._',
+          '/keyword          - lihat / ganti pemicu forwarding',
+          '/mention gabung|pisah|mati - cara mention dikirim',
           'Tombol on/off & template: /admin > Pengaturan',
           'Group tujuan: group yang AKTIF di /groups',
         ];
@@ -308,7 +308,54 @@ class TelegramService {
 
       case '/keyword': {
         if (!this.config.isAdmin(userId)) return true;
-        await this.bot.sendMessage(chatId, `🔎 Keyword filter:\n"${KEYWORD}"\n\n(case-insensitive, satu-satunya pemicu forwarding)`);
+        const argKw = text.slice(cmd.length).replace(/^@\S+/, '').trim();
+        const aktif = this.pipeline.keywordAktif();
+
+        if (!argKw) {
+          await this.bot.sendMessage(chatId, [
+            '🔎 PEMICU FORWARDING',
+            '',
+            aktif
+              ? `Sekarang: "${aktif}"`
+              : 'Sekarang: TANPA SARINGAN - semua pesan diteruskan.',
+            '(pencocokan mengabaikan besar-kecil huruf, newline, dan emoji)',
+            '',
+            'Ganti:',
+            '  /keyword PAKET INSTANT',
+            '',
+            'Teruskan semua pesan tanpa saringan kata:',
+            '  /keyword semua',
+          ].join('\n'));
+          return true;
+        }
+
+        // Mengosongkan saringan harus disengaja - tidak bisa lewat argumen kosong.
+        const baru = /^(semua|all|kosong)$/i.test(argKw) ? '' : argKw;
+        this.db.setSetting('forward_keyword', baru);
+        await this.bot.sendMessage(chatId, baru
+          ? `Tersimpan. Pemicu forwarding sekarang: "${baru}"\n\nBerlaku untuk pesan berikutnya, tanpa restart.`
+          : 'Tersimpan. Saringan kata DIMATIKAN - SELURUH pesan dari chat yang '
+            + 'diizinkan akan diteruskan ke WhatsApp, termasuk obrolan biasa.');
+        return true;
+      }
+
+      case '/mention': {
+        if (!this.config.isAdmin(userId)) return true;
+        const argM = text.slice(cmd.length).replace(/^@\S+/, '').trim().toLowerCase();
+        if (!['gabung', 'pisah', 'mati'].includes(argM)) {
+          await this.bot.sendMessage(chatId, [
+            '🏷️ CARA MENGIRIM MENTION',
+            '',
+            `Sekarang: ${this.pipeline.modeMention()}`,
+            '',
+            '/mention gabung - mention ditempel di bawah teks pesanan (1 pesan)',
+            '/mention pisah  - mention dikirim sebagai pesan kedua',
+            '/mention mati   - tanpa mention sama sekali',
+          ].join('\n'));
+          return true;
+        }
+        this.db.setSetting('mention_mode', argM);
+        await this.bot.sendMessage(chatId, `Tersimpan. Mode mention: ${argM}.`);
         return true;
       }
 

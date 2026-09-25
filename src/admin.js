@@ -2,7 +2,7 @@
 
 const logger = require('./logger').scope('ADMIN');
 const { validateWhatsappNumber, renderTemplate, renderPreviewForTelegram } = require('./render');
-const { KEYWORD } = require('./filter');
+const { KEYWORD_DEFAULT } = require('./filter');
 
 const STATE_TTL_MS = 10 * 60 * 1000; // 10 menit
 
@@ -462,10 +462,17 @@ class AdminMenu {
       `Sumber pesan: ${this.config.source}${this.config.usesUserSource ? ' (akun, baca saja)' : ''}`,
       this._userSourceLine(),
       '',
-      'Keyword filter (tetap, tidak dapat diubah dari sini):',
-      `"${KEYWORD}"`,
+      'Pemicu forwarding (ubah dengan /keyword):',
+      this.pipeline && this.pipeline.keywordAktif
+        ? (this.pipeline.keywordAktif()
+            ? `"${this.pipeline.keywordAktif()}"`
+            : '(tanpa saringan - SEMUA pesan diteruskan)')
+        : `"${KEYWORD_DEFAULT}"`,
+      this.pipeline && this.pipeline.modeMention
+        ? `Mention: ${this.pipeline.modeMention()} (ubah dengan /mention)`
+        : '',
       '',
-      'Nilai di atas diubah lewat file .env lalu restart aplikasi.',
+      'Nilai lain di atas diubah lewat file .env lalu restart aplikasi.',
     ].join('\n');
     return { text, keyboard: [[{ text: '⬅️ Kembali', callback_data: 'm:set' }]] };
   }
@@ -711,7 +718,7 @@ class AdminMenu {
         if (action === 'delay') {
           await this._answer(query.id);
           this.setState(chatId, from.id, 'set_delay');
-          return this._send(chatId, `⏱️ Jeda saat ini: ${this.queue.delayMs} ms\n\nKirim angka baru dalam milidetik (minimal 3000).\n\nKetik /batal untuk membatalkan.`);
+          return this._send(chatId, `⏱️ Jeda saat ini: ${this.queue.delayMs} ms\n\nKirim angka baru dalam milidetik (0 - 600000). 0 = tanpa jeda.\n\nKetik /batal untuk membatalkan.`);
         }
         if (action === 'fwin') {
           await this._answer(query.id);
@@ -750,7 +757,7 @@ class AdminMenu {
         }
         if (action === 'reload') {
           const delay = Number(this.db.getSetting('message_delay_ms', this.config.messageDelayMs));
-          this.queue.setDelay(Math.max(3000, delay));
+          this.queue.setDelay(Math.max(0, Number.isFinite(delay) ? delay : this.config.messageDelayMs));
           const win = this.db.getSetting('followup_window_ms', null);
           if (win !== null) this.pipeline.followUpWindowMs = Math.max(0, Number(win));
           const gid = this.db.getSetting('wa_group_id', '');
@@ -967,8 +974,8 @@ class AdminMenu {
         }
         case 'set_delay': {
           const n = parseInt(text, 10);
-          if (!Number.isFinite(n) || n < 3000 || n > 600000) {
-            await this._send(chatId, '⚠️ Masukkan angka 3000 - 600000 (milidetik). Coba lagi atau /batal.');
+          if (!Number.isFinite(n) || n < 0 || n > 600000) {
+            await this._send(chatId, '⚠️ Masukkan angka 0 - 600000 (milidetik). Coba lagi atau /batal.');
             return true;
           }
           this.db.setSetting('message_delay_ms', n);

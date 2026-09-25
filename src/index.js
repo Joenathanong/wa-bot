@@ -56,8 +56,14 @@ async function main() {
   db.pruneProcessed(60);
 
   // 2. Antrean pengiriman
-  const storedDelay = Number(db.getSetting('message_delay_ms', config.messageDelayMs));
-  const queue = new MessageQueue({ delayMs: Math.max(3000, storedDelay || config.messageDelayMs) });
+  // Tanpa batas bawah paksa: 0 ms diperbolehkan dan dihormati.
+  // "storedDelay || config.messageDelayMs" dulu membuat nilai tersimpan 0
+  // diam-diam jatuh ke default - justru nilai yang ingin dipakai sekarang.
+  const tersimpan = db.getSetting('message_delay_ms', null);
+  const storedDelay = tersimpan === null ? config.messageDelayMs : Number(tersimpan);
+  const queue = new MessageQueue({
+    delayMs: Math.max(0, Number.isFinite(storedDelay) ? storedDelay : config.messageDelayMs),
+  });
   logger.info('Jeda antar pesan WhatsApp:', queue.delayMs, 'ms');
 
   // 3. WhatsApp

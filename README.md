@@ -1352,17 +1352,59 @@ tersentuh (uji memakai file sementara).
 
 ---
 
-## Keyword
+## Keyword / pemicu forwarding
 
-Satu-satunya pemicu forwarding, didefinisikan di `src/filter.js`:
+Menu 1 kini dipakai untuk **meneruskan data pesanan** (PAKET INSTANT), bukan lagi
+peringatan stok. Karena itu keyword tidak lagi dipaku mati di kode.
 
-```js
-const KEYWORD = 'dengan stok tersedia di bawah stok ter-reserve';
-messageText.toLowerCase().includes(KEYWORD.toLowerCase());
+| Lapis | Nilai | Cara ubah |
+|---|---|---|
+| Default kode | `PAKET INSTANT` (`src/filter.js`) | ubah kode |
+| Default instalasi | `FORWARD_KEYWORD` di `.env` | restart aplikasi |
+| Nilai aktif | tabel `settings` -> `forward_keyword` | `/keyword <teks>` |
+
+```
+/keyword                    lihat pemicu yang sedang berlaku
+/keyword PAKET INSTANT      ganti pemicu (berlaku seketika, tanpa restart)
+/keyword semua              matikan saringan kata - SEMUA pesan diteruskan
 ```
 
-Tidak ada keyword lain. Tidak ada syarat tambahan berupa "PERINGATAN STOK SHOPEE",
-"Pusat", jumlah SKU, tanggal, emoji, Markdown, maupun HTML.
+Pencocokan mengabaikan besar-kecil huruf, newline, spasi ganda, emoji, dan
+Markdown. `/keyword` tanpa argumen hanya menampilkan, tidak menghapus - untuk
+mematikan saringan harus ditulis `semua` secara sengaja.
+
+### Bentuk pesan yang dikirim ke WhatsApp
+
+Isi pesan Telegram diteruskan **apa adanya**. Header `[FORWARDED FROM TELEGRAM]`
+sudah dibuang karena isinya perintah kerja operasional, bukan kutipan chat.
+
+Mention PIC menempel di bawah teks yang sama, jadi satu pesanan = satu notifikasi:
+
+```
+/mention gabung   mention ditempel di pesan yang sama (default)
+/mention pisah    mention dikirim sebagai pesan kedua (perilaku lama)
+/mention mati     tanpa mention
+```
+
+### Tanpa penundaan buatan
+
+Data pesanan datang pada waktu yang sudah acak dengan sendirinya, sehingga
+penundaan buatan tidak menambah keamanan akun - hanya membuat peringatan
+"kurir menunggu" jadi basi. Dua setelan berikut karena itu berisi **0**:
+
+| Setelan | Nilai | Arti |
+|---|---|---|
+| `MESSAGE_DELAY_MS` | `0` | tidak ada jeda antar pesan WhatsApp |
+| `FOLLOWUP_WINDOW_MS` | `0` | mention tidak ditunggu-tunggu (mode `pisah`) |
+
+Yang **tetap ada** dan sebaiknya jangan diubah: antrean pengiriman tetap
+**serial** - satu pesan diproses pada satu waktu. Itulah yang mencegah dua
+pengiriman WhatsApp tumpang tindih, dan itu bukan pola waktu yang bisa
+terbaca sebagai bot.
+
+Nilai jeda yang tersimpan di database menimpa `.env`. Bila di server pernah
+disetel 3000 ms lewat Admin Menu, ubah lewat `/admin > Pengaturan > Message
+Delay` menjadi `0` - mengedit `.env` saja tidak cukup.
 
 ---
 
