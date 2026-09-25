@@ -66,6 +66,10 @@ class LockScheduler {
     this.lastSkip = null;        // {waktu, alasan} - kenapa putaran terjadwal tidak mengirim
     this.stats = { runs: 0, sent: 0, failed: 0, skipped: 0, alerts: 0 };
     this._master = null;        // {waktu, rack, bundle}
+    // Sidik jari group yang bentrok dengan Forwarder. Disimpan di sini,
+    // BUKAN di targetGroups() yang dipanggil tiap putaran - kalau di sana,
+    // nilainya kembali null setiap kali dan peringatannya berulang terus.
+    this._sidikBentrok = null;
   }
 
   /* --------------------------- pengaturan --------------------------- */
@@ -539,14 +543,30 @@ class LockScheduler {
       const nama = bentrok.map((g) => g.name).join(', ');
       logger.warn(
         `Group "${nama}" juga AKTIF untuk Forwarder Telegram - peringatan lock dan `
-        + 'forward stok akan bercampur di sana. Matikan tombolnya (jadikan tidak aktif) '
-        + 'di /groups agar group ini khusus lock stock.'
+        + 'forward akan bercampur di sana.'
       );
-      this._notify(
-        `Group "${nama}" menerima DUA jalur sekaligus: peringatan lock stock dan forward `
-        + 'Telegram. Buka /groups lalu matikan status aktifnya bila ingin group ini '
-        + 'khusus lock stock.'
-      );
+      // Peringatan ini pernah hanya menawarkan SATU jalan keluar ("matikan
+      // status aktifnya"), seolah-olah group itu memang dimaksudkan untuk
+      // lock stock. Sering justru sebaliknya: yang salah adalah tujuan lock
+      // stocknya. Dua-duanya disebut supaya tidak menyesatkan.
+      //
+      // Dikirim SEKALI per kombinasi group, bukan tiap pemeriksaan - kalau
+      // tidak, satu salah setel berubah jadi banjir notifikasi tiap jam.
+      const sidik = bentrok.map((g) => g.id).sort().join('|');
+      if (this._sidikBentrok !== sidik) {
+        this._sidikBentrok = sidik;
+        this._notify(
+          `Group "${nama}" menerima DUA jalur sekaligus: peringatan lock stock dan `
+          + 'forward Telegram. Pilih salah satu:\n\n'
+          + `• Bila group ini MEMANG untuk lock stock: buka /groups lalu matikan `
+          + 'status aktifnya (⚪) supaya Forwarder berhenti mengirim ke sana.\n'
+          + `• Bila BUKAN: pindahkan tujuan lock stock dengan /lockgroup <group lain>, `
+          + 'atau /lockgroup hapus untuk mengosongkannya.\n\n'
+          + 'Pesan ini hanya dikirim sekali sampai setelannya berubah.'
+        );
+      }
+    } else {
+      this._sidikBentrok = null;
     }
 
     let terkirim = 0;

@@ -3860,6 +3860,35 @@ async function run() {
     assert.ok(/Terpisah dari Forwarder Telegram: ya/.test(s.ringkasanStatus()));
   });
 
+  await test('peringatan bentrok group dikirim sekali, bukan tiap putaran', async () => {
+    const pesan = [];
+    const isi = [{ id: 1, group_id: 'X@g.us', name: 'Testing', active: 1 }];
+    const dbX = {
+      listActiveWaGroups: () => isi.filter((g) => g.active),
+      listWaGroups: () => isi,
+      getSetting: (k, d = null) => d,
+      setSetting: () => {},
+    };
+    const s = new LockScheduler({
+      db: dbX, queue: new Queue({ delayMs: 0 }),
+      whatsapp: { isReady: () => true, sendText: async () => {} },
+      config: lockConfigPalsu({ groupIds: ['X@g.us'] }),
+      client: clientLockPalsu(),
+      notifyAdmins: (t) => pesan.push(t),
+    });
+
+    await s.runOnce({ paksa: true });
+    await s.runOnce({ paksa: true });
+    await s.runOnce({ paksa: true });
+    const bentrok = pesan.filter((t) => /DUA jalur sekaligus/.test(t));
+    assert.strictEqual(bentrok.length, 1,
+      `tiga putaran hanya boleh menghasilkan satu peringatan, dapat ${bentrok.length}`);
+    assert.ok(/lockgroup/.test(bentrok[0]),
+      'peringatan harus menyebut jalan keluar memindahkan tujuan lock stock');
+    assert.ok(/matikan status aktifnya|⚪/.test(bentrok[0]),
+      'peringatan harus menyebut jalan keluar mematikan status aktif');
+  });
+
   await test('/lockstatus mengatakan terus terang bila tujuan belum disetel', () => {
     const s = new LockScheduler({
       db: dbPalsu(), queue: new Queue({ delayMs: 0 }),

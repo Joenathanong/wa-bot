@@ -72,6 +72,24 @@ const BROWSER_LOCKED = /browser is already running|singletonlock|processsingleto
 // pemulihan tidak pernah selesai.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Tujuan sebenarnya dari pesan yang baru dikirim, bila berbeda dari yang
+ * diminta. WhatsApp menormalkan/mengalihkan JID tanpa memberi tahu, jadi
+ * selisih ini yang menjelaskan "berhasil kirim tapi tidak ada di group".
+ */
+function tujuanNyata(msg, diminta) {
+  try {
+    const id = msg && msg.id ? msg.id : null;
+    const nyata = (id && (id.remote && (id.remote._serialized || id.remote)))
+      || (msg && msg.to && (msg.to._serialized || msg.to))
+      || null;
+    if (!nyata || String(nyata) === String(diminta)) return '';
+    return ` (PERHATIAN: mendarat di ${nyata}, bukan ${diminta})`;
+  } catch (e) {
+    return '';
+  }
+}
+
 /** Jangan biarkan penutupan browser menggantung selamanya. */
 function withTimeout(promise, ms, label = 'operasi') {
   let timer = null;
@@ -849,7 +867,14 @@ class WhatsAppService extends EventEmitter {
 
     try {
       const msg = await this.client.sendMessage(chatId, text, options);
-      logger.info(`Pesan terkirim ke ${chatId}` + (options.mentions ? ` dengan ${options.mentions.length} mention` : ''));
+      // Catat tujuan yang BENAR-BENAR dipakai WhatsApp, bukan hanya yang kita
+      // minta. Bila JID tersimpan salah, sendMessage tetap berhasil tetapi
+      // pesannya mendarat di chat lain - tanpa baris ini, laporan "Diteruskan"
+      // terlihat sukses padahal tidak ada yang sampai ke group yang dimaksud.
+      logger.info(
+        `Pesan terkirim ke ${chatId}${tujuanNyata(msg, chatId)}`
+        + (options.mentions ? ` dengan ${options.mentions.length} mention` : '')
+      );
       return msg;
     } catch (err) {
       // Beberapa versi whatsapp-web.js lama meminta objek Contact,
