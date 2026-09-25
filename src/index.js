@@ -13,6 +13,7 @@ const OcsScheduler = require('./ocs-scheduler');
 const StockScheduler = require('./stock-scheduler');
 const LockScheduler = require('./lock-scheduler');
 const { pasangPengamanShutdown } = require('./shutdown-guard');
+const tujuan = require('./tujuan');
 const { KEYWORD } = require('./filter');
 
 const startedAt = Date.now();
@@ -91,6 +92,38 @@ async function main() {
     adminFactory: ({ bot, pipeline }) => new AdminMenu({ bot, db, whatsapp: wa, queue, config, pipeline, startedAt }),
   });
   await tg.start();
+
+  // 4b. Pastikan Forwarder dan Peringatan Lock Stock tidak menumpuk di satu
+  //     group. Diperiksa SAAT START, bukan hanya saat setelan diubah:
+  //     setelan lama yang sudah terlanjur menumpuk tidak akan pernah lewat
+  //     jalur /lockgroup lagi, jadi tanpa pemeriksaan ini ia diam selamanya.
+  try {
+    const pisah = tujuan.pisahkanOtomatis(db, config);
+    if (pisah.dipisah.length > 0) {
+      const nama = pisah.dipisah.map((g) => g.name).join(', ');
+      logger.warn(`Group "${nama}" dinonaktifkan dari Forwarder - group itu tujuan Peringatan Lock Stock.`);
+      tg.notifyAdmins(
+        `Group "${nama}" dipakai Forwarder Telegram DAN Peringatan Lock Stock sekaligus.\n\n`
+        + 'Sudah dipisah: group itu dinonaktifkan di /groups, jadi sekarang hanya '
+        + 'menerima peringatan lock stock. Forward pesanan tetap ke group aktif lainnya.\n\n'
+        + 'Periksa kapan saja dengan /tujuan.'
+      );
+    } else if (pisah.tidakBisaDipisah) {
+      const peta = tujuan.petaTujuan(db, config);
+      const nama = peta.bentrok.map((g) => g.name).join(', ');
+      logger.warn(`Group "${nama}" dipakai dua jalur sekaligus dan tidak ada group aktif lain.`);
+      tg.notifyAdmins(
+        `Forwarder Telegram dan Peringatan Lock Stock sama-sama memakai group "${nama}".\n\n`
+        + 'Tidak dipisah otomatis karena itu satu-satunya group aktif - forward pesanan '
+        + 'tidak boleh berhenti. Pilih salah satu:\n'
+        + '  a) /lockgroup <group lain>\n'
+        + '  b) tambah group baru di /groups lalu nonaktifkan yang ini\n\n'
+        + 'Periksa dengan /tujuan.'
+      );
+    }
+  } catch (err) {
+    logger.error('Pemeriksaan pemisahan group tujuan gagal:', err.message);
+  }
 
   // 5. Event WhatsApp -> notifikasi admin
   wa.on('qr', (qr) => {

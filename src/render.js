@@ -80,6 +80,31 @@ function buildMentions(users, mentionDisplay = 'number') {
   return { text: joinNatural(parts), jids };
 }
 
+/** Penanda "tag semua anggota group" yang dikenali di dalam template. */
+const PENANDA_SEMUA = ['{all}', '{semua}', '{everyone}'];
+
+/** Apakah template meminta tag seluruh anggota group? */
+function mintaTagSemua(content) {
+  const t = String(content == null ? '' : content).toLowerCase();
+  return PENANDA_SEMUA.some((p) => t.includes(p));
+}
+
+/** Ubah daftar JID menjadi potongan "@nomor @nomor ..." */
+function jidKeTeksMention(jids) {
+  return (Array.isArray(jids) ? jids : [])
+    .map((j) => `@${String(j).split('@')[0]}`)
+    .join(' ');
+}
+
+function gabungUnik(a, b) {
+  const hasil = [];
+  for (const x of [...(a || []), ...(b || [])]) {
+    const v = String(x);
+    if (v && !hasil.includes(v)) hasil.push(v);
+  }
+  return hasil;
+}
+
 function timestampParts(date = new Date()) {
   const p = (n) => String(n).padStart(2, '0');
   return {
@@ -98,15 +123,40 @@ function renderTemplate(content, users, options = {}) {
   const { text: mentionText, jids } = buildMentions(list, mentionDisplay);
   const ts = timestampParts(options.now || new Date());
 
+  // "Tag semua anggota group": daftar JID seluruh anggota, diambil pemanggil
+  // dari WhatsApp. Dua cara memakainya, dan keduanya benar-benar berbeda:
+  //
+  //   a) template memuat {all}  -> nomor semua anggota IKUT TERLIHAT di teks
+  //   b) options.tagAll = true  -> teks tidak berubah sama sekali, tetapi
+  //      seluruh JID tetap dikirim pada opsi `mentions`. WhatsApp tetap
+  //      memberi notifikasi ke semua orang ("tag tersembunyi"), sementara
+  //      pesannya tetap rapi - ini yang biasanya diinginkan di group besar.
+  const semuaJid = Array.isArray(options.allJids) ? options.allJids : [];
+  const pakaiPenanda = mintaTagSemua(content);
+  const teksSemua = jidKeTeksMention(semuaJid);
+
   const count = Number(options.count || 1);
-  const text = String(content)
+  let text = String(content)
     .split('{users}').join(mentionText || '(belum ada user aktif)')
     .split('{count}').join(String(count))
     .split('{datetime}').join(`${ts.date} ${ts.time}`)
     .split('{date}').join(ts.date)
     .split('{time}').join(ts.time);
+  for (const p of PENANDA_SEMUA) {
+    text = text.split(p).join(teksSemua || mentionText || '(anggota group belum terbaca)');
+  }
 
-  return { text, mentions: jids, users: list, hasUsers: jids.length > 0 };
+  const mentions = (pakaiPenanda || options.tagAll === true)
+    ? gabungUnik(jids, semuaJid)
+    : jids;
+
+  return {
+    text,
+    mentions,
+    users: list,
+    hasUsers: mentions.length > 0,
+    tagSemua: pakaiPenanda || options.tagAll === true,
+  };
 }
 
 /**
@@ -117,15 +167,20 @@ function renderPreviewForTelegram(content, users, options = {}) {
   const list = Array.isArray(users) ? users : [];
   const names = joinNatural(list.map((u) => `@${u.name}`));
   const ts = timestampParts(options.now || new Date());
-  return String(content)
+  let teks = String(content)
     .split('{users}').join(names || '(belum ada user aktif)')
     .split('{count}').join(String(options.count || 1))
     .split('{datetime}').join(`${ts.date} ${ts.time}`)
     .split('{date}').join(ts.date)
     .split('{time}').join(ts.time);
+  for (const p of PENANDA_SEMUA) teks = teks.split(p).join('@semua anggota group');
+  return teks;
 }
 
 module.exports = {
+  PENANDA_SEMUA,
+  mintaTagSemua,
+  jidKeTeksMention,
   numberToJid,
   validateWhatsappNumber,
   buildMentions,

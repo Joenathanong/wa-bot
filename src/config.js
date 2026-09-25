@@ -307,6 +307,11 @@ const config = {
   // mati   = tanpa mention. Nilai aktif tersimpan di settings (/mention).
   mentionMode: (process.env.MENTION_MODE || 'gabung').trim().toLowerCase(),
 
+  // Nilai AWAL "tag semua anggota group". Begitu diubah lewat /tagall atau
+  // Admin Menu, yang berlaku adalah setelan di database - baris ini hanya
+  // menentukan keadaan saat database masih kosong.
+  mentionAll: /^(1|true|ya|on)$/i.test(String(process.env.MENTION_ALL || '').trim()),
+
   isAdmin(telegramUserId) {
     return adminIds.includes(String(telegramUserId));
   },

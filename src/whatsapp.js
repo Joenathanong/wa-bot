@@ -841,6 +841,97 @@ class WhatsAppService extends EventEmitter {
     return { id: String(id), name: info.subject || info.name || '(tanpa nama)' };
   }
 
+  /**
+   * Daftar JID SELURUH anggota sebuah group WhatsApp.
+   *
+   * Dipakai oleh "tag all": WhatsApp mengirim notifikasi ke setiap JID yang
+   * ada di opsi `mentions`, TERMASUK bila teks pesannya tidak memuat
+   * "@<nomor>" untuk orang itu. Jadi satu pesan rapi bisa tetap menyentil
+   * semua anggota tanpa berubah menjadi deretan angka sepanjang layar.
+   *
+   * Nomor bot sendiri dibuang - tidak ada gunanya bot menyentil dirinya.
+   * Jalur cadangan (baca Store langsung) dipakai karena getChatById() ikut
+   * rusak pada sebagian build WhatsApp Web, sama seperti getChats().
+   *
+   * @returns {Promise<string[]>} contoh: ['6281234567890@c.us', ...]
+   */
+  async groupParticipants(chatId) {
+    if (!this.isReady()) throw new Error('WhatsApp belum siap (belum ready)');
+    if (!chatId || !/@g\.us$/i.test(String(chatId))) {
+      throw new Error('Tag semua anggota hanya berlaku untuk Group (JID @g.us)');
+    }
+
+    const milikSendiri = this.meJid();
+    const bersihkan = (daftar) => {
+      const hasil = [];
+      for (const j of daftar) {
+        const jid = String(j || '').trim();
+        if (!jid || !/@(c\.us|lid|s\.whatsapp\.net)$/i.test(jid)) continue;
+        const normal = jid.replace(/@s\.whatsapp\.net$/i, '@c.us');
+        if (milikSendiri && normal.split('@')[0] === String(milikSendiri).split('@')[0]) continue;
+        if (!hasil.includes(normal)) hasil.push(normal);
+      }
+      return hasil;
+    };
+
+    try {
+      const chat = await this.client.getChatById(String(chatId));
+      const peserta = (chat && chat.participants) || [];
+      const jids = peserta.map((p) => (p && p.id && (p.id._serialized || p.id)) || p);
+      const hasil = bersihkan(jids);
+      if (hasil.length > 0) return hasil;
+    } catch (err) {
+      if (isContextLost(err)) {
+        logger.warn('Halaman WhatsApp Web terlepas saat membaca anggota group - memulihkan koneksi.');
+        this.recover('anggota group: halaman terlepas').catch(() => { /* sudah dicatat */ });
+        throw new Error('Halaman WhatsApp Web terlepas; koneksi sedang dipulihkan.');
+      }
+      logger.warn('getChatById() gagal membaca anggota group, mencoba Store langsung -', describeError(err));
+    }
+
+    const page = this.client && this.client.pupPage;
+    if (!page || typeof page.evaluate !== 'function') {
+      throw new Error('Daftar anggota group tidak dapat dibaca');
+    }
+    const dariStore = await page.evaluate((gid) => {
+      try {
+        const S = window.Store || {};
+        const chat = S.Chat && S.Chat.get ? S.Chat.get(gid) : null;
+        const meta = chat && chat.groupMetadata
+          ? chat.groupMetadata
+          : (S.GroupMetadata && S.GroupMetadata.get ? S.GroupMetadata.get(gid) : null);
+        const peserta = meta && meta.participants
+          ? (meta.participants.getModelsArray ? meta.participants.getModelsArray() : meta.participants)
+          : [];
+        return (peserta || []).map((p) => {
+          const id = p && (p.id || (p.contact && p.contact.id));
+          if (!id) return null;
+          return id._serialized || (id.user ? id.user + '@' + (id.server || 'c.us') : String(id));
+        }).filter(Boolean);
+      } catch (e) {
+        return [];
+      }
+    }, String(chatId));
+
+    const hasil = bersihkan(dariStore || []);
+    if (hasil.length === 0) {
+      throw new Error('Daftar anggota group kosong - bot mungkin bukan anggota group tersebut');
+    }
+    return hasil;
+  }
+
+  /** JID nomor WhatsApp yang sedang dipakai bot (bila diketahui). */
+  meJid() {
+    try {
+      const info = this.client && this.client.info;
+      const wid = info && (info.wid || info.me);
+      if (!wid) return null;
+      return String(wid._serialized || wid);
+    } catch (e) {
+      return null;
+    }
+  }
+
   async getChatName(chatId) {
     if (!this.isReady()) return null;
     try {

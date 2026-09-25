@@ -1,7 +1,8 @@
 'use strict';
 
 const logger = require('./logger').scope('ADMIN');
-const { validateWhatsappNumber, renderTemplate, renderPreviewForTelegram } = require('./render');
+const { validateWhatsappNumber, renderTemplate, renderPreviewForTelegram, mintaTagSemua } = require('./render');
+const tujuan = require('./tujuan');
 const { KEYWORD_DEFAULT } = require('./filter');
 
 const STATE_TTL_MS = 10 * 60 * 1000; // 10 menit
@@ -168,6 +169,30 @@ class AdminMenu {
     return { text, keyboard };
   }
 
+  /**
+   * Penilaian jujur terhadap template baru: apakah ia benar-benar akan
+   * menghasilkan mention?
+   *
+   * Dulu baris ini hanya mencari {users} dan memvonis "tidak akan ada
+   * mention" bila tidak ada. Itu keliru sejak ada dua jalan lain menuju
+   * mention - {all} di dalam teks, dan setelan "Tag semua anggota" yang
+   * bekerja TANPA penanda apa pun. Template tanpa {users} bisa saja sudah
+   * benar; peringatan yang salah justru menuntun admin merusak template
+   * yang sudah bekerja.
+   */
+  _catatanMention(raw) {
+    const teks = String(raw || '');
+    const adaUsers = teks.includes('{users}');
+    const adaSemua = mintaTagSemua(teks);
+    const tagAll = this.db.getSetting('mention_all', '0') === '1';
+
+    if (adaSemua) return 'Placeholder {all} ditemukan - SELURUH anggota group tujuan akan di-mention, nomornya ikut terlihat.';
+    if (adaUsers && tagAll) return 'Placeholder {users} ditemukan, dan "Tag semua anggota" sedang NYALA - seluruh anggota group tetap ikut disentil.';
+    if (adaUsers) return 'Placeholder {users} ditemukan - user terdaftar akan di-mention.';
+    if (tagAll) return 'Tidak ada {users}, tetapi "Tag semua anggota" sedang NYALA - seluruh anggota group tetap disentil tanpa nomor terlihat.';
+    return 'Tidak ada {users} maupun {all}, dan "Tag semua anggota" MATI - pesan ini tidak akan menyentil siapa pun.';
+  }
+
   /* ============================== TEMPLATE ============================ */
   templatesView() {
     const templates = this.db.listTemplates();
@@ -187,7 +212,11 @@ class AdminMenu {
       ]);
     }
     lines.push('');
-    lines.push('Placeholder: {users} {datetime} {date} {time}');
+    lines.push('Placeholder: {users} {all} {count} {datetime} {date} {time}');
+    lines.push('{users} = user terdaftar di Admin Menu');
+    lines.push('{all}   = SELURUH anggota group tujuan (nomornya ikut terlihat)');
+    lines.push('Ingin semua anggota disentil tanpa nomornya terlihat?');
+    lines.push('Pakai Pengaturan > Tag Semua Anggota (atau /tagall on).');
     keyboard.push([{ text: '⬅️ Kembali', callback_data: 'm:main' }]);
     return { text: lines.join('\n'), keyboard };
   }
@@ -207,11 +236,22 @@ class AdminMenu {
       lines.push('Tekan "✍️ Tambah Manual" lalu tempelkan link undangan group,');
       lines.push('atau "🔍 Cari Otomatis" untuk memuat daftar dari akun WhatsApp.');
     } else {
-      lines.push(`Pesan dikirim ke SEMUA group bertanda 🟢 (${aktif.length} aktif).`);
+      lines.push(`Forward Telegram dikirim ke SEMUA group bertanda 🟢 (${aktif.length} aktif).`);
       lines.push('');
+      // Tanda 🔒 membuat pembagian tugas kelihatan di layar yang sama.
+      // Tanpa ini, satu-satunya cara tahu sebuah group dipakai Peringatan
+      // Lock Stock adalah mengingatnya.
+      const jidLock = tujuan.jidLock(this.db, this.config);
       for (const g of groups) {
-        lines.push(`${g.active ? '🟢' : '⚪'} ${g.name || '(tanpa nama)'}`);
+        const lock = jidLock.includes(String(g.group_id));
+        lines.push(`${g.active ? '🟢' : '⚪'}${lock ? '🔒' : ''} ${g.name || '(tanpa nama)'}`);
         lines.push(`   ${g.group_id}`);
+      }
+      if (jidLock.length > 0) {
+        lines.push('');
+        lines.push('🔒 = tujuan Peringatan Lock Stock (jalur 4).');
+        lines.push('Group bertanda 🔒 sengaja dibiarkan ⚪ supaya dua jalur');
+        lines.push('tidak menumpuk di satu ruang. Bandingkan lewat /tujuan.');
       }
       if (aktif.length === 0) {
         lines.push('');
@@ -341,7 +381,13 @@ class AdminMenu {
   /* ============================== STATUS ============================== */
   statusView() {
     const wa = this.wa.status();
-    const groups = this.db.listActiveWaGroups();
+    // Tujuan forwarder YANG SEBENARNYA dipakai - bukan sekadar "semua group
+    // aktif". Group tujuan Peringatan Lock Stock sudah disingkirkan di sini,
+    // jadi layar status tidak lagi menjanjikan tujuan yang tak akan dikirimi.
+    const groups = this.pipeline && this.pipeline.targetGroups
+      ? this.pipeline.targetGroups().map((g) => ({ group_id: g.id, name: g.name }))
+      : this.db.listActiveWaGroups();
+    const lockJid = tujuan.jidLock(this.db, this.config);
     const activeUsers = this.db.listActiveUsers();
     const template = this.db.getActiveTemplate();
     const st = this.pipeline ? this.pipeline.stats : { seen: 0, matched: 0, forwarded: 0, ignored: 0, failed: 0 };
@@ -359,8 +405,12 @@ class AdminMenu {
       wa.account ? `Akun: ${maskNumber(wa.account)}` : '',
       wa.recoveries ? `Pemulihan halaman: ${wa.recoveries}x` : '',
       '',
-      `Target Group (${groups.length} aktif):`,
+      `Target Group Forwarder (${groups.length}):`,
       groups.length ? groups.map((g) => `• ${g.name || g.group_id}`).join('\n') : '• (belum ada)',
+      lockJid.length
+        ? `Target Peringatan Lock Stock: ${lockJid.length} group (lihat /tujuan)`
+        : 'Target Peringatan Lock Stock: belum disetel (/lockgroup)',
+      `Tag semua anggota: ${this.db.getSetting('mention_all', '0') === '1' ? 'NYALA' : 'MATI'}`,
       '',
       `Active Users: ${activeUsers.length}`,
       `Active Template: ${template ? template.name : '(tidak ada)'}`,
@@ -433,6 +483,7 @@ class AdminMenu {
       `Jeda antar pesan : ${this.queue.delayMs} ms`,
       `Jendela follow-up: ${Math.round((this.pipeline ? this.pipeline.followUpWindowMs : 0) / 1000)} detik`,
       `Format mention   : ${this.db.getSetting('mention_display', 'number') === 'name' ? 'Nama + nomor' : 'Nomor saja'}`,
+      `Tag semua anggota: ${this.db.getSetting('mention_all', '0') === '1' ? 'NYALA - seluruh anggota group disentil' : 'MATI - hanya user terdaftar'}`,
       '',
       'Jendela follow-up: peringatan yang terpecah menjadi beberapa bagian',
       '("bagian 1/2", "bagian 2/2") tetap diteruskan semua, tetapi pesan',
@@ -443,6 +494,7 @@ class AdminMenu {
     const keyboard = [
       [{ text: '🔑 Telegram Settings', callback_data: 's:tg' }, { text: '📱 WhatsApp Settings', callback_data: 's:wa' }],
       [{ text: '⏱️ Message Delay', callback_data: 's:delay' }, { text: '🔤 Format Mention', callback_data: 's:mention' }],
+      [{ text: '🔔 Tag Semua Anggota ON/OFF', callback_data: 's:tagall' }],
       [{ text: '⏳ Jendela Follow-up', callback_data: 's:fwin' }],
       [{ text: '🔁 Forwarding ON/OFF', callback_data: 's:fwd' }],
       [{ text: '🔄 Reload Configuration', callback_data: 's:reload' }],
@@ -578,7 +630,8 @@ class AdminMenu {
             '──────────',
             '',
             'Silakan kirim template baru (boleh beberapa baris).',
-            'Gunakan {users} sebagai penanda mention.',
+            'Gunakan {users} sebagai penanda mention user terdaftar,',
+            'atau {all} untuk menyentil SELURUH anggota group tujuan.',
             '',
             'Ketik /batal untuk membatalkan.',
           ].join('\n'));
@@ -673,6 +726,25 @@ class AdminMenu {
         }
 
         if (action === 't') {
+          // Mengaktifkan group yang menjadi tujuan Peringatan Lock Stock
+          // berarti menyatukan kembali dua jalur yang sengaja dipisah.
+          // Ditolak di sini, bukan didiamkan lalu ketahuan dari isi group.
+          if (!group.active && tujuan.jidLock(this.db, this.config).includes(String(group.group_id))) {
+            await this._answer(query.id, 'Group ini tujuan Lock Stock', true);
+            await this._send(chatId, [
+              `⚠️ Group "${group.name || group.group_id}" adalah tujuan PERINGATAN LOCK STOCK.`,
+              '',
+              'Mengaktifkannya membuat Forwarder Telegram ikut mengirim ke sana,',
+              'sehingga pesanan dan peringatan lock stock menumpuk di satu ruang.',
+              '',
+              'Bila memang ingin lock stock pindah ke group lain:',
+              '  /lockgroup <link / JID / nama group>',
+              '',
+              'Perbandingan kedua jalur: /tujuan',
+            ].join('\n'));
+            const vg = this.groupsView();
+            return this._edit(query, vg.text, vg.keyboard);
+          }
           const updated = this.db.updateWaGroup(group.id, { active: group.active ? 0 : 1 });
           logger.info(`Group "${updated.name}" ${updated.active ? 'DIAKTIFKAN' : 'DINONAKTIFKAN'} oleh admin ${from.id}`);
           await this._answer(query.id, updated.active ? 'Aktif' : 'Nonaktif');
@@ -743,6 +815,18 @@ class AdminMenu {
           const next = cur === 'name' ? 'number' : 'name';
           this.db.setSetting('mention_display', next);
           await this._answer(query.id, next === 'name' ? 'Nama + nomor' : 'Nomor saja');
+          const v = this.settingsView();
+          return this._edit(query, v.text, v.keyboard);
+        }
+        if (action === 'tagall') {
+          const cur = this.db.getSetting('mention_all', '0');
+          const next = cur === '1' ? '0' : '1';
+          this.db.setSetting('mention_all', next);
+          if (this.pipeline && this.pipeline.lupakanAnggota) this.pipeline.lupakanAnggota();
+          logger.info(`Tag semua anggota di-set ${next === '1' ? 'NYALA' : 'MATI'} oleh admin ${from.id}`);
+          await this._answer(query.id, next === '1'
+            ? 'Semua anggota group disentil'
+            : 'Hanya user terdaftar');
           const v = this.settingsView();
           return this._edit(query, v.text, v.keyboard);
         }
@@ -900,7 +984,7 @@ class AdminMenu {
             raw,
             '──────────',
             '',
-            raw.includes('{users}') ? '✅ Placeholder {users} ditemukan.' : '⚠️ Tidak ada {users} - tidak akan ada mention!',
+            this._catatanMention(raw),
             '',
             'Preview:',
             renderPreviewForTelegram(raw, users),

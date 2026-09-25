@@ -720,8 +720,43 @@ async function run() {
     await click(`t:e:${tpl.id}`);
     bot.clear();
     await send('Tidak ada placeholder di sini.');
-    assert.ok(bot.allText().includes('tidak akan ada mention'));
+    assert.ok(bot.allText().includes('tidak akan menyentil siapa pun'));
     await click('tc:cancel');
+  });
+
+  bot.clear();
+  await test('template dengan {all} TIDAK diberi peringatan palsu', async () => {
+    const tpl = idb.getActiveTemplate();
+    await click(`t:e:${tpl.id}`);
+    bot.clear();
+    await send('Dear {all}\n\nSegera siapkan barangnya.');
+    assert.ok(bot.allText().includes('{all}'), 'penanda {all} disebut');
+    assert.ok(!bot.allText().includes('tidak akan menyentil siapa pun'),
+      'template yang justru menyentil semua orang tidak boleh divonis tanpa mention');
+    await click('tc:cancel');
+  });
+
+  bot.clear();
+  await test('tanpa {users} tetapi Tag Semua NYALA: bukan peringatan', async () => {
+    idb.setSetting('mention_all', '1');
+    const tpl = idb.getActiveTemplate();
+    await click(`t:e:${tpl.id}`);
+    bot.clear();
+    await send('Segera siapkan barangnya, driver menunggu.');
+    assert.ok(!bot.allText().includes('tidak akan menyentil siapa pun'));
+    assert.ok(bot.allText().includes('NYALA'));
+    await click('tc:cancel');
+    idb.setSetting('mention_all', '0');
+  });
+
+  bot.clear();
+  await test('tombol Tag Semua Anggota menyalakan dan mematikan', async () => {
+    await click('s:tagall');
+    assert.strictEqual(idb.getSetting('mention_all', '0'), '1');
+    assert.ok(bot.allText().includes('NYALA'));
+    bot.clear();
+    await click('s:tagall');
+    assert.strictEqual(idb.getSetting('mention_all', '0'), '0');
   });
 
   bot.clear();
@@ -4048,6 +4083,217 @@ async function run() {
     const isrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
     assert.ok(!/Math\.max\(3000, storedDelay/.test(isrc),
       'index.js tidak boleh lagi memaksa jeda minimal 3000 ms saat start');
+  });
+
+  /* ====== 14. Pemisahan group tujuan + tag semua anggota group ====== */
+  section('14. Group tujuan terpisah & tag semua anggota');
+
+  const Tujuan = require('../src/tujuan');
+
+  /** DB palsu berisi daftar group yang bisa diubah. */
+  function dbTujuan(groups, setting = {}) {
+    const isi = groups.map((g, i) => ({ id: i + 1, active: 1, ...g }));
+    const store = { ...setting };
+    return {
+      _isi: isi,
+      listWaGroups: () => isi,
+      listActiveWaGroups: () => isi.filter((g) => g.active),
+      updateWaGroup: (id, patch) => {
+        const row = isi.find((g) => g.id === id);
+        Object.assign(row, patch);
+        return row;
+      },
+      getSetting: (k, d = null) => (k in store ? store[k] : d),
+      setSetting: (k, v) => { store[k] = String(v); },
+    };
+  }
+  const cfgKosong = { lock: { groupIds: [] } };
+
+  await test('lock stock belum disetel: forwarder memakai semua group aktif', () => {
+    const db = dbTujuan([{ group_id: 'A@g.us', name: 'INSTANT OPS' }]);
+    assert.deepStrictEqual(Tujuan.tujuanForwarder(db, cfgKosong).map((g) => g.id), ['A@g.us']);
+    assert.strictEqual(Tujuan.bentrok(db, cfgKosong).length, 0);
+    assert.ok(Tujuan.ringkasan(db, cfgKosong).includes('belum disetel'));
+  });
+
+  await test('group tujuan lock stock disingkirkan dari forwarder', () => {
+    const db = dbTujuan(
+      [{ group_id: 'A@g.us', name: 'INSTANT OPS' }, { group_id: 'B@g.us', name: 'LOCK STOCK' }],
+      { lock_groups: 'B@g.us' }
+    );
+    const hasil = Tujuan.tujuanForwarderRinci(db, cfgKosong);
+    assert.deepStrictEqual(hasil.groups.map((g) => g.id), ['A@g.us']);
+    assert.deepStrictEqual(hasil.disingkirkan.map((g) => g.id), ['B@g.us']);
+    assert.strictEqual(hasil.tidakBisaDipisah, false);
+  });
+
+  await test('tujuan lock stock boleh ditulis dengan NAMA group', () => {
+    const db = dbTujuan(
+      [{ group_id: 'A@g.us', name: 'INSTANT OPS' }, { group_id: 'B@g.us', name: 'Lock Stock' }],
+      { lock_groups: 'lock stock' }
+    );
+    assert.deepStrictEqual(Tujuan.jidLock(db, cfgKosong), ['B@g.us']);
+    assert.deepStrictEqual(Tujuan.tujuanForwarder(db, cfgKosong).map((g) => g.id), ['A@g.us']);
+  });
+
+  await test('pemisahan TIDAK PERNAH mengosongkan tujuan forwarder', () => {
+    const db = dbTujuan([{ group_id: 'A@g.us', name: 'SATU-SATUNYA' }], { lock_groups: 'A@g.us' });
+    const hasil = Tujuan.tujuanForwarderRinci(db, cfgKosong);
+    assert.deepStrictEqual(hasil.groups.map((g) => g.id), ['A@g.us'],
+      'forward pesanan tidak boleh berhenti hanya karena salah setel');
+    assert.strictEqual(hasil.tidakBisaDipisah, true);
+    assert.ok(Tujuan.ringkasan(db, cfgKosong).includes('SAMA'));
+  });
+
+  await test('pisahkanOtomatis menonaktifkan group lock dari /groups', () => {
+    const db = dbTujuan(
+      [{ group_id: 'A@g.us', name: 'INSTANT OPS' }, { group_id: 'B@g.us', name: 'LOCK STOCK' }],
+      { lock_groups: 'B@g.us' }
+    );
+    const hasil = Tujuan.pisahkanOtomatis(db, cfgKosong);
+    assert.strictEqual(hasil.dipisah.length, 1);
+    assert.strictEqual(db._isi.find((g) => g.group_id === 'B@g.us').active, 0);
+    assert.deepStrictEqual(db.listActiveWaGroups().map((g) => g.group_id), ['A@g.us']);
+  });
+
+  await test('pisahkanOtomatis menahan diri bila group aktif hanya satu', () => {
+    const db = dbTujuan([{ group_id: 'A@g.us', name: 'SATU-SATUNYA' }], { lock_groups: 'A@g.us' });
+    const hasil = Tujuan.pisahkanOtomatis(db, cfgKosong);
+    assert.strictEqual(hasil.dipisah.length, 0);
+    assert.strictEqual(hasil.tidakBisaDipisah, true);
+    assert.strictEqual(db._isi[0].active, 1, 'group tidak boleh dimatikan sepihak');
+  });
+
+  /* ---- pipeline: tujuan terpisah + tag semua anggota ---- */
+  function tagSetup({ setting = {}, groups = null, anggota = null, template = null } = {}) {
+    const store = { ...setting };
+    const diproses = new Set();
+    const terkirim = [];
+    let dipanggil = 0;
+    const isi = groups || [{ group_id: 'G1@g.us', name: 'INSTANT OPS', id: 1, active: 1 }];
+    const db = {
+      listWaGroups: () => isi,
+      listActiveWaGroups: () => isi.filter((g) => g.active !== 0),
+      updateWaGroup: (id, patch) => Object.assign(isi.find((g) => g.id === id), patch),
+      getSetting: (k, d = null) => (k in store ? store[k] : d),
+      setSetting: (k, v) => { store[k] = String(v); },
+      isProcessed: (c, m) => diproses.has(`${c}:${m}`),
+      markProcessed: (c, m) => diproses.add(`${c}:${m}`),
+      getActiveTemplate: () => ({ content: template || 'Dear {users}, mohon diproses.' }),
+      listActiveUsers: () => [{ name: 'Ibu Manda', whatsapp_number: '6281234567890' }],
+    };
+    const cfg = {
+      isAllowedChat: () => true,
+      forwardKeyword: 'PAKET INSTANT',
+      mentionMode: 'gabung',
+      followUp: { windowMs: 0, maxWaitMs: 1000 },
+      lock: { groupIds: [] },
+    };
+    const wa = {
+      isReady: () => true,
+      sendText: async (gid, teks, mentions) => { terkirim.push({ gid, teks, mentions: mentions || [] }); },
+      groupParticipants: async () => {
+        dipanggil += 1;
+        if (anggota === 'gagal') throw new Error('Store tidak terbaca');
+        return anggota || ['6281234567890@c.us', '6285773479551@c.us', '628976245500@c.us'];
+      },
+    };
+    const notif = [];
+    const pipe = new Pipeline({
+      db, whatsapp: wa, queue: new Queue({ delayMs: 0 }), config: cfg,
+      notifyAdmins: (t) => notif.push(t),
+    });
+    return { pipe, terkirim, store, notif, hitung: () => dipanggil, isi };
+  }
+  const PESANAN_TAG = 'PAKET INSTANT\nSO-001 perlu disiapkan';
+
+  await test('tag semua MATI: hanya user terdaftar yang di-mention', async () => {
+    const { pipe, terkirim } = tagSetup();
+    await pipe.handle({ chatId: '-1', messageId: 'a1', text: PESANAN_TAG });
+    assert.deepStrictEqual(terkirim[0].mentions, ['6281234567890@c.us']);
+  });
+
+  await test('tag semua NYALA: seluruh anggota group ikut di-mention', async () => {
+    const { pipe, terkirim } = tagSetup({ setting: { mention_all: '1' } });
+    await pipe.handle({ chatId: '-1', messageId: 'a2', text: PESANAN_TAG });
+    assert.strictEqual(terkirim.length, 1);
+    assert.deepStrictEqual(terkirim[0].mentions.sort(), [
+      '6281234567890@c.us', '6285773479551@c.us', '628976245500@c.us',
+    ].sort());
+  });
+
+  await test('tag semua NYALA tidak mengubah teks pesan', async () => {
+    const { pipe, terkirim } = tagSetup({ setting: { mention_all: '1' } });
+    await pipe.handle({ chatId: '-1', messageId: 'a3', text: PESANAN_TAG });
+    const teks = terkirim[0].teks;
+    assert.ok(teks.includes('Dear @6281234567890, mohon diproses.'));
+    assert.ok(!teks.includes('6285773479551'),
+      'nomor anggota lain tidak boleh membanjiri teks - notifikasinya lewat opsi mentions');
+  });
+
+  await test('{all} membuat nomor seluruh anggota ikut terlihat', async () => {
+    const { pipe, terkirim } = tagSetup({ template: 'Dear {all}\n\nSegera siapkan barangnya.' });
+    await pipe.handle({ chatId: '-1', messageId: 'a4', text: PESANAN_TAG });
+    assert.ok(terkirim[0].teks.includes('@6285773479551'));
+    assert.strictEqual(terkirim[0].mentions.length, 3);
+  });
+
+  await test('daftar anggota gagal dibaca: pesan tetap terkirim', async () => {
+    const { pipe, terkirim } = tagSetup({ setting: { mention_all: '1' }, anggota: 'gagal' });
+    const hasil = await pipe.handle({ chatId: '-1', messageId: 'a5', text: PESANAN_TAG });
+    assert.strictEqual(hasil.action, 'forwarded');
+    assert.deepStrictEqual(terkirim[0].mentions, ['6281234567890@c.us'],
+      'jatuh kembali ke user terdaftar, bukan gagal kirim');
+  });
+
+  await test('daftar anggota tidak dibaca ulang tiap pesan', async () => {
+    const t = tagSetup({ setting: { mention_all: '1' } });
+    await t.pipe.handle({ chatId: '-1', messageId: 'a6', text: PESANAN_TAG });
+    await t.pipe.handle({ chatId: '-1', messageId: 'a7', text: PESANAN_TAG });
+    assert.strictEqual(t.terkirim.length, 2);
+    assert.strictEqual(t.hitung(), 1, 'halaman WhatsApp Web cukup ditanya sekali');
+    t.pipe.lupakanAnggota();
+    await t.pipe.handle({ chatId: '-1', messageId: 'a8', text: PESANAN_TAG });
+    assert.strictEqual(t.hitung(), 2, 'setelah dilupakan, dibaca ulang');
+  });
+
+  await test('tag semua tidak dipanggil bila tidak diperlukan', async () => {
+    const t = tagSetup();
+    await t.pipe.handle({ chatId: '-1', messageId: 'a9', text: PESANAN_TAG });
+    assert.strictEqual(t.hitung(), 0, 'jangan menanyai WhatsApp tanpa alasan');
+  });
+
+  await test('pipeline tidak meneruskan ke group tujuan lock stock', async () => {
+    const t = tagSetup({
+      setting: { lock_groups: 'G2@g.us' },
+      groups: [
+        { group_id: 'G1@g.us', name: 'INSTANT OPS', id: 1, active: 1 },
+        { group_id: 'G2@g.us', name: 'LOCK STOCK', id: 2, active: 1 },
+      ],
+    });
+    await t.pipe.handle({ chatId: '-1', messageId: 'b1', text: PESANAN_TAG });
+    assert.deepStrictEqual(t.terkirim.map((x) => x.gid), ['G1@g.us']);
+  });
+
+  await test('group lock yang satu-satunya: tetap dikirim + admin diberi tahu sekali', async () => {
+    const t = tagSetup({
+      setting: { lock_groups: 'G1@g.us' },
+      groups: [{ group_id: 'G1@g.us', name: 'GABUNGAN', id: 1, active: 1 }],
+    });
+    await t.pipe.handle({ chatId: '-1', messageId: 'b2', text: PESANAN_TAG });
+    await t.pipe.handle({ chatId: '-1', messageId: 'b3', text: PESANAN_TAG });
+    assert.strictEqual(t.terkirim.length, 2, 'forward pesanan tidak boleh berhenti');
+    assert.strictEqual(t.notif.length, 1, 'peringatan dikirim sekali, bukan tiap pesan');
+    assert.ok(t.notif[0].includes('GABUNGAN'));
+    assert.ok(t.notif[0].includes('/lockgroup'));
+  });
+
+  await test('mode pisah: pesan kedua ikut menyentil semua anggota', async () => {
+    const t = tagSetup({ setting: { mention_all: '1', mention_mode: 'pisah' } });
+    await t.pipe.handle({ chatId: '-1', messageId: 'b4', text: PESANAN_TAG });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.strictEqual(t.terkirim.length, 2);
+    assert.strictEqual(t.terkirim[1].mentions.length, 3);
   });
 
   /* ------------------------------ hasil --------------------------- */

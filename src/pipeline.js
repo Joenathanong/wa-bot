@@ -2,7 +2,8 @@
 
 const logger = require('./logger').scope('FLOW');
 const { shouldForward, KEYWORD_DEFAULT } = require('./filter');
-const { renderTemplate } = require('./render');
+const { renderTemplate, mintaTagSemua } = require('./render');
+const tujuan = require('./tujuan');
 
 /**
  * Alur otomatis Telegram -> WhatsApp.
@@ -32,6 +33,13 @@ class Pipeline {
     this._inFlight = new Set();
     this._pending = null;       // {group, count, firstAt}
     this._followUpTimer = null;
+    // Daftar anggota group untuk "tag all". Disimpan sebentar (ANGGOTA_TTL_MS)
+    // karena membacanya berarti menanyai halaman WhatsApp Web - mahal, dan
+    // keanggotaan group tidak berubah tiap menit.
+    this._anggota = new Map();  // groupId -> {jids, saat}
+    // Sidik jari bentrok tujuan; dipakai agar peringatan "dua jalur satu
+    // group" dikirim sekali per keadaan, bukan tiap pesan masuk.
+    this._sidikBentrok = null;
   }
 
   /**
@@ -62,26 +70,119 @@ class Pipeline {
   }
 
   /**
-   * Potongan mention siap tempel. Mengembalikan teks kosong bila mention
-   * dimatikan atau template/user belum disiapkan.
+   * "Tag semua anggota group" untuk pesan forwarder.
+   *
+   * Menyala berarti SELURUH anggota group tujuan ikut di-mention, bukan hanya
+   * user yang terdaftar di Admin Menu. Teks pesannya tidak berubah: JID
+   * anggota dikirim lewat opsi `mentions`, dan WhatsApp tetap memberi
+   * notifikasi ke semua orang - "tag tersembunyi". Template yang memuat
+   * {all} menyalakannya sendiri, dengan nomor yang ikut terlihat.
    */
-  _potonganMention() {
+  tagSemuaAktif() {
+    const tersimpan = this.db.getSetting('mention_all', null);
+    if (tersimpan !== null && tersimpan !== undefined && tersimpan !== '') {
+      return String(tersimpan) === '1';
+    }
+    return this.config && this.config.mentionAll === true;
+  }
+
+  /**
+   * JID seluruh anggota sebuah group. Kegagalan TIDAK membatalkan pengiriman:
+   * lebih baik pesan sampai dengan mention seadanya daripada tidak sampai.
+   */
+  async _anggotaGroup(groupId) {
+    if (!this.wa || typeof this.wa.groupParticipants !== 'function') return [];
+    const simpan = this._anggota.get(groupId);
+    if (simpan && (Date.now() - simpan.saat) < Pipeline.ANGGOTA_TTL_MS) return simpan.jids;
+    try {
+      const jids = await this.wa.groupParticipants(groupId);
+      this._anggota.set(groupId, { jids, saat: Date.now() });
+      return jids;
+    } catch (err) {
+      logger.warn(`Daftar anggota group ${groupId} tidak terbaca (tag semua dilewati): ${err.message}`);
+      return simpan ? simpan.jids : [];
+    }
+  }
+
+  /** Buang ingatan daftar anggota (dipakai setelah anggota group berubah). */
+  lupakanAnggota(groupId = null) {
+    if (groupId) this._anggota.delete(groupId);
+    else this._anggota.clear();
+  }
+
+  /**
+   * Potongan mention siap tempel untuk SATU group tujuan.
+   *
+   * Dulu potongan ini dihitung sekali untuk semua group. Itu tidak bisa
+   * dipertahankan begitu ada "tag semua anggota": anggota tiap group berbeda,
+   * jadi mention-nya harus dibentuk per group.
+   *
+   * Mengembalikan teks kosong bila mention dimatikan atau template/user
+   * belum disiapkan.
+   */
+  async _potonganMention(groupId = null) {
     if (this.modeMention() !== 'gabung') return { teks: '', mentions: [] };
     const template = this.db.getActiveTemplate();
     if (!template) return { teks: '', mentions: [] };
     const users = this.db.listActiveUsers();
+    const tagAll = this.tagSemuaAktif();
+    const perlu = tagAll || mintaTagSemua(template.content);
+    const allJids = (perlu && groupId) ? await this._anggotaGroup(groupId) : [];
     const rendered = renderTemplate(template.content, users, {
       mentionDisplay: this.db.getSetting('mention_display', 'number'),
       count: 1,
+      allJids,
+      tagAll,
     });
     const teks = String(rendered.text || '').trim();
     if (!teks) return { teks: '', mentions: [] };
     return { teks, mentions: rendered.mentions };
   }
 
-  /** Seluruh WhatsApp Group tujuan yang sedang aktif. */
+  /**
+   * WhatsApp Group tujuan FORWARDER.
+   *
+   * Bukan lagi sekadar "semua group aktif": group yang sudah menjadi tujuan
+   * PERINGATAN LOCK STOCK disingkirkan di sini, supaya dua jalur yang punya
+   * PIC dan irama sendiri tidak menumpuk di ruang yang sama. Lihat
+   * src/tujuan.js untuk aturan lengkapnya, termasuk kenapa pemisahan ini
+   * TIDAK pernah membuat daftar tujuan forwarder menjadi kosong.
+   */
   targetGroups() {
-    return this.db.listActiveWaGroups().map((g) => ({ id: g.group_id, name: g.name || g.group_id }));
+    const rinci = tujuan.tujuanForwarderRinci(this.db, this.config);
+    if (rinci.disingkirkan.length > 0) {
+      const nama = rinci.disingkirkan.map((g) => g.name).join(', ');
+      this._sekaliBentrok(`pisah:${nama}`, () => logger.info(
+        `Group "${nama}" dilewati forwarder - group itu tujuan Peringatan Lock Stock.`
+      ));
+    } else if (rinci.tidakBisaDipisah) {
+      const nama = rinci.groups.map((g) => g.name).join(', ');
+      this._sekaliBentrok(`sama:${nama}`, () => {
+        logger.warn(
+          `Group "${nama}" dipakai forwarder DAN peringatan lock stock sekaligus, `
+          + 'dan tidak ada group aktif lain sebagai gantinya - forward tetap dikirim '
+          + 'ke sana supaya pesanan tidak berhenti.'
+        );
+        this._notify(
+          `Forwarder Telegram dan Peringatan Lock Stock sama-sama memakai group "${nama}".\n\n`
+          + 'Tidak dipisah otomatis karena itu satu-satunya group aktif - memberhentikan '
+          + 'forward pesanan jauh lebih merugikan. Pilih salah satu:\n'
+          + '  a) /lockgroup <group lain> - pindahkan peringatan lock stock, atau\n'
+          + '  b) tambah group baru di /groups lalu nonaktifkan yang ini.\n\n'
+          + 'Periksa kapan saja dengan /tujuan.'
+        );
+      });
+    } else {
+      this._sidikBentrok = null;
+    }
+    return rinci.groups.map((g) => ({ id: g.id, name: g.name }));
+  }
+
+  /** Jalankan sesuatu sekali saja selama keadaannya belum berubah. */
+  _sekaliBentrok(sidik, fn) {
+    if (this._sidikBentrok === sidik) return;
+    this._sidikBentrok = sidik;
+    try { fn(); } catch (e) { /* jangan sampai menggagalkan pengiriman */ }
   }
 
   /**
@@ -179,11 +280,13 @@ class Pipeline {
       // adalah perintah kerja operasional, bukan kutipan chat.
       // Mention ikut DITEMPEL di sini (mode 'gabung') supaya satu pesanan
       // hanya menghasilkan satu notifikasi di group WhatsApp.
-      const tempel = this._potonganMention();
-      const forwardText = tempel.teks ? `${text}\n\n${tempel.teks}` : text;
       const hasil = [];
       for (const group of groups) {
         try {
+          // Mention dibentuk PER GROUP: bila "tag semua anggota" menyala,
+          // anggota tiap group berbeda-beda.
+          const tempel = await this._potonganMention(group.id);
+          const forwardText = tempel.teks ? `${text}\n\n${tempel.teks}` : text;
           await this.queue.enqueue(
             () => this.wa.sendText(group.id, forwardText, tempel.mentions),
             `forward ${messageId} -> ${group.name}`
@@ -272,10 +375,8 @@ class Pipeline {
     if (users.length === 0) {
       logger.warn('Tidak ada user ACTIVE - follow-up dikirim tanpa mention');
     }
-    const rendered = renderTemplate(template.content, users, {
-      mentionDisplay: this.db.getSetting('mention_display', 'number'),
-      count: pending.count,
-    });
+    const tagAll = this.tagSemuaAktif();
+    const perluAnggota = tagAll || mintaTagSemua(template.content);
 
     // Daftar group dibaca ulang di sini, bukan saat dijadwalkan, supaya
     // perubahan target lewat Admin Menu langsung ikut berlaku.
@@ -288,6 +389,13 @@ class Pipeline {
     let terkirim = 0;
     for (const group of groups) {
       try {
+        const allJids = perluAnggota ? await this._anggotaGroup(group.id) : [];
+        const rendered = renderTemplate(template.content, users, {
+          mentionDisplay: this.db.getSetting('mention_display', 'number'),
+          count: pending.count,
+          allJids,
+          tagAll,
+        });
         await this.queue.enqueue(
           () => this.wa.sendText(group.id, rendered.text, rendered.mentions),
           `follow-up -> ${group.name} (${pending.count} peringatan, ${rendered.mentions.length} mention)`
@@ -318,6 +426,9 @@ class Pipeline {
     }
   }
 }
+
+/** Lama daftar anggota group diingat sebelum dibaca ulang (ms). */
+Pipeline.ANGGOTA_TTL_MS = 5 * 60 * 1000;
 
 module.exports = Pipeline;
 module.exports.KEYWORD = KEYWORD_DEFAULT;

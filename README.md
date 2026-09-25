@@ -400,8 +400,10 @@ Perintah yang tersedia:
 | `/status` | admin | Status koneksi & statistik |
 | `/admin` | admin | Buka Admin Menu |
 | `/groups` | admin | Daftar & pilih WhatsApp Group |
+| `/tujuan` | admin | Bandingkan group tujuan Forwarder vs Peringatan Lock Stock (SAMA / BEDA). `/tujuan pisah` memisahkannya |
 | `/wadiag` | admin | Diagnosa mengapa daftar group tidak terbaca |
 | `/keyword` | admin | Tampilkan keyword aktif |
+| `/tagall on\|off` | admin | Sentil SELURUH anggota group tujuan, bukan hanya user terdaftar |
 | `/batal` | admin | Batalkan input yang sedang berjalan |
 
 ---
@@ -507,11 +509,54 @@ Placeholder yang tersedia:
 
 | Placeholder | Diganti dengan |
 |---|---|
-| `{users}` | Seluruh user **ACTIVE** sebagai REAL mention |
+| `{users}` | Seluruh user **ACTIVE** di Admin Menu, sebagai REAL mention |
+| `{all}` | **Seluruh anggota group tujuan** sebagai REAL mention (nomornya ikut terlihat). Sinonim: `{semua}`, `{everyone}` |
 | `{count}` | Jumlah pesan peringatan yang digabung dalam satu follow-up |
 | `{datetime}` | `2026-08-21 21:14:43` |
 | `{date}` | `2026-08-21` |
 | `{time}` | `21:14:43` |
+
+### Tag semua anggota group
+
+Ada **dua** cara menyentil seluruh anggota group, dan keduanya berbeda hasil
+di layar penerima:
+
+| Cara | Teks pesan | Siapa yang dapat notifikasi |
+|---|---|---|
+| `{all}` di dalam template | Nomor semua anggota **ikut terlihat** (`@6281… @6285… @6289…`) | Semua anggota group |
+| `/tagall on` (atau Pengaturan → 🔔 Tag Semua Anggota) | **Tidak berubah sama sekali** | Semua anggota group |
+
+`/tagall on` memakai "tag tersembunyi": nomor seluruh anggota dikirim lewat
+opsi `mentions` WhatsApp, tanpa ikut ditulis di badan pesan. WhatsApp tetap
+memberi notifikasi ke semua orang, sementara pesannya tetap rapi:
+
+```
+PAKET INSTANT
+SO-00123 - 4 item
+
+Dear Ibu Sandra @6285773479551, Ibu Manda @6289635419346 & Bpk Maulana @628976245500
+
+*Segera siapkan Barangnya, agar driver tidak menunggu lama.*
+
+Terima kasih.
+
+_Sent by BOT-WRH_
+```
+
+Pesan di atas terbaca seperti biasa, tetapi **seluruh** anggota group ikut
+menerima notifikasi mention. Ini yang biasanya diinginkan di group besar:
+`{all}` di group berisi 40 orang akan menghasilkan 40 nomor di layar.
+
+Catatan:
+
+- Daftar anggota dibaca dari WhatsApp dan **diingat 5 menit**, supaya halaman
+  WhatsApp Web tidak ditanyai setiap pesan masuk.
+- Bila daftar anggota gagal dibaca (misalnya halaman sedang dipulihkan),
+  pesan **tetap dikirim** dengan mention user terdaftar saja — lebih baik
+  sampai dengan mention seadanya daripada tidak sampai.
+- Bot tidak pernah menyentil dirinya sendiri.
+- Nilai awal bisa diatur lewat `MENTION_ALL=true` di `.env`; setelah diubah
+  lewat `/tagall`, yang berlaku adalah setelan di database.
 
 **🔄 Reset** mengembalikan template ke isi default di atas.
 
@@ -560,7 +605,56 @@ terus berdatangan tanpa jeda.
 
 Aplikasi mendukung **beberapa group tujuan sekaligus**. Setiap peringatan
 diteruskan ke **semua** group yang berstatus aktif, masing-masing dengan pesan
-mention-nya sendiri.
+mention-nya sendiri — **dikurangi** group yang sudah menjadi tujuan
+Peringatan Lock Stock (lihat 13b).
+
+### 13b. Satu group tidak boleh dipakai dua jalur
+
+Dua jalur memilih tujuannya dengan cara yang berbeda:
+
+| Jalur | Cara memilih tujuan |
+|---|---|
+| **1. Forwarder Telegram → WhatsApp** | Semua group yang **aktif** (🟢) di `/groups` |
+| **4. Peringatan Lock Stock** | Group yang **disebut** lewat `/lockgroup` |
+
+Karena yang satu memakai "semua yang aktif" dan yang lain "yang disebut",
+satu group yang sama bisa diam-diam masuk ke dua-duanya: pesanan PAKET
+INSTANT dan peringatan lock stock menumpuk di satu ruang, mention-nya
+bercampur, dan PIC berhenti membacanya.
+
+Perintah `/tujuan` menjawab pertanyaan "apakah group-nya sama?" dengan pasti:
+
+```
+📌 GROUP TUJUAN TIAP JALUR
+
+1. FORWARDER TELEGRAM -> WHATSAPP
+  • INSTANT OPS (120363011111111111@g.us)
+
+4. PERINGATAN LOCK STOCK
+  • LOCK STOCK NCO (120363022222222222@g.us)
+
+Status: ✅ BEDA - kedua jalur mengirim ke group yang berlainan.
+```
+
+Pemisahannya dijaga di tiga tempat sekaligus:
+
+1. **Saat aplikasi start** — bila ada group yang dipakai dua-duanya, group
+   itu otomatis dinonaktifkan dari `/groups` dan admin diberi tahu.
+2. **Saat `/lockgroup` disetel** — group yang baru ditunjuk langsung
+   dinonaktifkan untuk Forwarder.
+3. **Saat mengaktifkan group di `/groups`** — group bertanda 🔒 (tujuan lock
+   stock) **ditolak** untuk diaktifkan, dengan penjelasan.
+
+Paksa pemeriksaan kapan saja dengan `/tujuan pisah`.
+
+**Satu pengecualian yang disengaja:** bila group yang bentrok adalah
+**satu-satunya** group aktif, pemisahan **tidak** dilakukan. Memberhentikan
+forward pesanan — jalur yang membuat driver menunggu di gudang — hanya karena
+salah setel adalah kerusakan yang jauh lebih besar daripada dua jalur yang
+menumpuk. Keadaan itu dilaporkan ke admin lewat Telegram (sekali, bukan tiap
+pesan), dan jalan keluarnya disebutkan: pindahkan lock stock ke group lain
+dengan `/lockgroup`, atau tambah group baru di `/groups` lalu nonaktifkan
+yang ini.
 
 `/groups` atau `/admin` → **📱 WhatsApp Group**
 
@@ -1424,6 +1518,14 @@ Mention PIC menempel di bawah teks yang sama, jadi satu pesanan = satu notifikas
 /mention gabung   mention ditempel di pesan yang sama (default)
 /mention pisah    mention dikirim sebagai pesan kedua (perilaku lama)
 /mention mati     tanpa mention
+```
+
+Siapa yang di-mention:
+
+```
+/tagall off       hanya user ACTIVE di Admin Menu ({users}) - default
+/tagall on        SELURUH anggota group tujuan, teks pesan tidak berubah
+{all} di template SELURUH anggota group, nomornya ikut terlihat di teks
 ```
 
 ### Tanpa penundaan buatan

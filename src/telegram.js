@@ -1,6 +1,7 @@
 'use strict';
 
 const logger = require('./logger').scope('TG');
+const tujuan = require('./tujuan');
 
 /**
  * Lapisan Telegram: polling, perintah, routing ke Admin Menu dan Pipeline.
@@ -178,6 +179,7 @@ class TelegramService {
           ...(isAdmin ? [
             '/admin   - buka Admin Menu',
             '/groups  - daftar & aktifkan WhatsApp Group',
+            '/tujuan  - group tujuan tiap jalur (cek SAMA / BEDA)',
             '/wadiag  - diagnosa daftar group WhatsApp',
           ] : []),
         ];
@@ -189,8 +191,10 @@ class TelegramService {
           '_dengan mention PIC ditempel di pesan yang sama. Tanpa tunda._',
           '/keyword          - lihat / ganti pemicu forwarding',
           '/mention gabung|pisah|mati - cara mention dikirim',
+          '/tagall on|off    - sentil SELURUH anggota group, bukan hanya user terdaftar',
           'Tombol on/off & template: /admin > Pengaturan',
-          'Group tujuan: group yang AKTIF di /groups',
+          'Group tujuan: group yang AKTIF di /groups,',
+          'dikurangi group tujuan Peringatan Lock Stock (lihat /tujuan)',
         ];
 
         const fulfilment = [
@@ -234,6 +238,7 @@ class TelegramService {
           '/lockwa <Shop> <Nomor>  - nomor PIC agar di-mention (urut, pisah koma)',
           '/lockjeda 60 7    - jeda menit + penyimpangan acak',
           '/lockgroup        - group tujuan (WAJIB, terpisah dari Forwarder)',
+          '/tujuan           - bandingkan dengan group Forwarder',
           '/lockulang on|off - ulangi pesan yang sama tiap jam?',
         ];
 
@@ -356,6 +361,79 @@ class TelegramService {
         }
         this.db.setSetting('mention_mode', argM);
         await this.bot.sendMessage(chatId, `Tersimpan. Mode mention: ${argM}.`);
+        return true;
+      }
+
+      case '/tagall': {
+        if (!this.config.isAdmin(userId)) return true;
+        const argT = text.slice(cmd.length).replace(/^@\S+/, '').trim().toLowerCase();
+        const sedang = this.pipeline.tagSemuaAktif();
+        if (!/^(on|off|nyala|mati|1|0|ya|tidak)$/i.test(argT)) {
+          await this.bot.sendMessage(chatId, [
+            '🔔 TAG SEMUA ANGGOTA GROUP',
+            '',
+            `Sekarang: ${sedang ? 'NYALA' : 'MATI'}`,
+            '',
+            sedang
+              ? 'Setiap pesan forwarder menyentil SELURUH anggota group tujuan,'
+              : 'Pesan forwarder hanya menyentil user yang terdaftar di Admin Menu,',
+            sedang
+              ? 'bukan hanya user yang terdaftar di Admin Menu.'
+              : 'yaitu yang menggantikan {users} di template.',
+            '',
+            'Teks pesan TIDAK berubah. Nomor semua anggota dikirim diam-diam,',
+            'jadi WhatsApp tetap memberi notifikasi ke semua orang tanpa',
+            'pesannya berubah menjadi deretan angka sepanjang layar.',
+            '',
+            '/tagall on  - sentil semua anggota group',
+            '/tagall off - hanya user terdaftar',
+            '',
+            'Ingin nomornya IKUT TERLIHAT? Pakai {all} di dalam template',
+            '(/admin > Template Pesan), bukan perintah ini.',
+          ].join('\n'));
+          return true;
+        }
+        const nyala = /^(on|nyala|1|ya)$/i.test(argT);
+        this.db.setSetting('mention_all', nyala ? '1' : '0');
+        this.pipeline.lupakanAnggota();
+        await this.bot.sendMessage(chatId, nyala
+          ? 'Tersimpan. Setiap pesan forwarder sekarang menyentil SELURUH anggota '
+            + 'group tujuan.\n\nBerlaku untuk pesan berikutnya, tanpa restart.'
+          : 'Tersimpan. Pesan forwarder kembali hanya menyentil user terdaftar '
+            + '({users} di template).');
+        return true;
+      }
+
+      case '/tujuan': {
+        if (!this.config.isAdmin(userId)) return true;
+        const argJ = text.slice(cmd.length).replace(/^@\S+/, '').trim().toLowerCase();
+
+        if (/^(pisah|pisahkan)$/i.test(argJ)) {
+          const hasil = tujuan.pisahkanOtomatis(this.db, this.config);
+          if (hasil.dipisah.length > 0) {
+            const nama = hasil.dipisah.map((g) => g.name).join(', ');
+            logger.info(`Group "${nama}" dinonaktifkan dari forwarder oleh admin ${userId} lewat /tujuan pisah`);
+            if (this.pipeline) this.pipeline.lupakanAnggota();
+            await this.bot.sendMessage(chatId,
+              `Selesai. Group "${nama}" dinonaktifkan di /groups, jadi Forwarder `
+              + 'Telegram berhenti mengirim ke sana. Peringatan lock stock tetap ke group itu.\n\n'
+              + tujuan.ringkasan(this.db, this.config));
+            return true;
+          }
+          if (hasil.tidakBisaDipisah) {
+            await this.bot.sendMessage(chatId,
+              'Tidak dipisah: itu satu-satunya group aktif, jadi memisahkannya '
+              + 'akan membuat forward pesanan berhenti total.\n\n'
+              + 'Pindahkan peringatan lock stock ke group lain dengan /lockgroup, '
+              + 'atau tambah group baru di /groups lebih dulu.');
+            return true;
+          }
+          await this.bot.sendMessage(chatId, 'Tidak ada yang perlu dipisah - kedua jalur sudah berbeda group.');
+          return true;
+        }
+
+        await this.bot.sendMessage(chatId, tujuan.ringkasan(this.db, this.config)
+          + '\n\nPisahkan otomatis: /tujuan pisah');
         return true;
       }
 
@@ -658,17 +736,44 @@ class TelegramService {
                 this.db.updateWaGroup(baru.id, { active: 0 });
               }
               const pesan = this.lock.setOpsi('groups', info.id);
-              const catatan = sudahAda && sudahAda.active
-                ? '\n\nPERHATIAN: group ini AKTIF di /groups, jadi Forwarder Telegram '
-                  + 'juga mengirim ke sana. Matikan (⚪) di /groups bila ingin terpisah.'
-                : '\n\nGroup didaftarkan sebagai TIDAK AKTIF di /groups, '
-                  + 'jadi Forwarder Telegram tidak ikut mengirim ke sana.';
+              let catatan = '\n\nGroup didaftarkan sebagai TIDAK AKTIF di /groups, '
+                + 'jadi Forwarder Telegram tidak ikut mengirim ke sana.';
+              if (sudahAda && sudahAda.active) {
+                // Group lama yang sedang aktif: pisahkan sekarang juga.
+                const hp = tujuan.pisahkanOtomatis(this.db, this.config);
+                if (this.pipeline) this.pipeline.lupakanAnggota();
+                catatan = hp.dipisah.length > 0
+                  ? '\n\nGroup ini otomatis DINONAKTIFKAN di /groups, jadi Forwarder '
+                    + 'Telegram berhenti mengirim ke sana.'
+                  : '\n\nPERHATIAN: group ini satu-satunya group AKTIF di /groups, jadi '
+                    + 'Forwarder Telegram masih ikut mengirim ke sana. Tambah group lain '
+                    + 'di /groups, atau pindahkan lock stock ke group lain.';
+              }
               await this.bot.sendMessage(chatId,
                 `Tersimpan. ${pesan}\nNama group: ${info.name}${catatan}`);
               return true;
             }
 
-            await this.bot.sendMessage(chatId, `Tersimpan. ${this.lock.setOpsi('groups', arg)}`);
+            const pesanSimpan = this.lock.setOpsi('groups', arg);
+            // Menyetel tujuan lock stock ke group yang JUGA aktif untuk
+            // Forwarder tidak memisahkan apa pun - dua jalur tetap menumpuk
+            // di ruang yang sama. Pemisahannya dikerjakan di sini, di tempat
+            // pilihannya dibuat, bukan diserahkan ke admin untuk diingat.
+            const hasilPisah = tujuan.pisahkanOtomatis(this.db, this.config);
+            let catatanPisah = '';
+            if (hasilPisah.dipisah.length > 0) {
+              const nama = hasilPisah.dipisah.map((g) => g.name).join(', ');
+              logger.info(`Group "${nama}" dinonaktifkan dari forwarder karena dijadikan tujuan lock stock`);
+              if (this.pipeline) this.pipeline.lupakanAnggota();
+              catatanPisah = `\n\nGroup "${nama}" otomatis DINONAKTIFKAN di /groups, `
+                + 'jadi Forwarder Telegram tidak ikut mengirim ke sana.';
+            } else if (hasilPisah.tidakBisaDipisah) {
+              catatanPisah = '\n\nPERHATIAN: group ini satu-satunya group AKTIF di /groups, '
+                + 'jadi Forwarder Telegram masih ikut mengirim ke sana. Tidak dinonaktifkan '
+                + 'otomatis karena itu akan menghentikan forward pesanan sama sekali. '
+                + 'Tambah group lain di /groups, atau pindahkan lock stock ke group lain.';
+            }
+            await this.bot.sendMessage(chatId, `Tersimpan. ${pesanSimpan}${catatanPisah}`);
             return true;
           }
 
