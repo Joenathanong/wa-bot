@@ -1267,6 +1267,62 @@ async function run() {
     assert.ok(bot.allText().includes('tersimpan dan langsung aktif'));
   });
 
+  /* ---- /lockgroup menerima link undangan (bukan hanya JID) ---- */
+  await test('/lockgroup dengan link undangan mendaftarkan group TIDAK AKTIF', async () => {
+    global.__WA_STUB__.invites.LockOnly99 = { id: '120363099999999999@g.us', name: 'LOCK STOCK IEG' };
+    const disimpan = [];
+    tg.lock = {
+      opsi: () => ({ groupIds: [] }),
+      setOpsi: (nama, nilai) => { disimpan.push({ nama, nilai }); return `Group tujuan: ${nilai}`; },
+    };
+    bot.clear();
+    await send('/lockgroup https://chat.whatsapp.com/LockOnly99');
+    await sleep(40);
+
+    const g = idb.getWaGroupByGid('120363099999999999@g.us');
+    assert.ok(g, 'group dari link undangan harus terdaftar');
+    assert.strictEqual(g.name, 'LOCK STOCK IEG');
+    assert.strictEqual(g.active, 0, 'HARUS tidak aktif - kalau aktif, Forwarder ikut mengirim ke sana');
+    assert.deepStrictEqual(disimpan, [{ nama: 'groups', nilai: '120363099999999999@g.us' }]);
+    assert.ok(bot.allText().includes('TIDAK AKTIF'), bot.allText().slice(0, 200));
+  });
+
+  await test('/lockgroup memperingatkan bila group itu aktif untuk Forwarder', async () => {
+    tg.lock = { opsi: () => ({ groupIds: [] }), setOpsi: () => 'Group tujuan: x' };
+    bot.clear();
+    // AbCdEf123456 -> 120363033333333333@g.us, sudah aktif dari uji sebelumnya.
+    await send('/lockgroup https://chat.whatsapp.com/AbCdEf123456');
+    await sleep(40);
+    const g = idb.getWaGroupByGid('120363033333333333@g.us');
+    assert.strictEqual(g.active, 1, 'status group yang sudah ada tidak boleh diubah diam-diam');
+    assert.ok(bot.allText().includes('PERHATIAN'), bot.allText().slice(0, 300));
+  });
+
+  await test('/lockgroup dengan link tak dikenal tidak mendaftarkan apa pun', async () => {
+    tg.lock = { opsi: () => ({ groupIds: [] }), setOpsi: () => { throw new Error('tidak boleh dipanggil'); } };
+    const sebelum = idb.listWaGroups().length;
+    bot.clear();
+    await send('/lockgroup https://chat.whatsapp.com/TidakAda000');
+    await sleep(40);
+    assert.strictEqual(idb.listWaGroups().length, sebelum, 'tidak ada group baru');
+    assert.ok(bot.allText().includes('ANGGOTA'), 'jelaskan bot harus jadi anggota dulu');
+  });
+
+  await test('/lockgroup tanpa argumen hanya menampilkan bantuan', async () => {
+    let dipanggil = false;
+    tg.lock = {
+      opsi: () => ({ groupIds: ['120363099999999999@g.us'] }),
+      setOpsi: () => { dipanggil = true; return ''; },
+    };
+    bot.clear();
+    await send('/lockgroup');
+    await sleep(40);
+    assert.strictEqual(dipanggil, false, 'argumen kosong TIDAK boleh mengubah setelan');
+    assert.ok(bot.allText().includes('120363099999999999@g.us'), 'tampilkan isi sekarang');
+    assert.ok(bot.allText().includes('/lockgroup hapus'), 'cara mengosongkan harus disengaja');
+  });
+  tg.lock = null;
+
   bot.clear();
   await test('isi manual dengan Group ID langsung juga diterima', async () => {
     await click('g:man');

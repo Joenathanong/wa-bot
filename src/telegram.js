@@ -607,10 +607,14 @@ class TelegramService {
                   ? `Sekarang: ${sekarang.join(', ')}`
                   : 'Sekarang: BELUM DISETEL - peringatan tidak akan terkirim.',
                 '',
-                'Cara isi (nama group atau JID):',
+                'Cara isi (pilih salah satu):',
+                '  /lockgroup https://chat.whatsapp.com/AbCdEf123456',
+                '  /lockgroup 120363011111111111@g.us',
                 '  /lockgroup Nama Group Lock Stock',
-                '  /lockgroup 6281234567890-1600000000@g.us',
                 '',
+                'Link undangan otomatis diterjemahkan jadi JID, dan groupnya',
+                'didaftarkan TIDAK AKTIF supaya Forwarder tidak ikut mengirim.',
+                'Syaratnya bot sudah menjadi ANGGOTA group tersebut.',
                 'Daftar group beserta JID-nya ada di /groups.',
                 'Group ini HARUS berbeda dari group Forwarder Telegram.',
                 '',
@@ -618,8 +622,53 @@ class TelegramService {
               ].join('\n'));
               return true;
             }
-            const isi = /^(hapus|kosong|kosongkan|clear)$/i.test(arg) ? '' : arg;
-            await this.bot.sendMessage(chatId, `Tersimpan. ${this.lock.setOpsi('groups', isi)}`);
+            if (/^(hapus|kosong|kosongkan|clear)$/i.test(arg)) {
+              await this.bot.sendMessage(chatId, `Tersimpan. ${this.lock.setOpsi('groups', '')}`);
+              return true;
+            }
+
+            // Link undangan WhatsApp bukan JID - dulu ditolak mentah-mentah
+            // walau itu yang paling mudah disalin dari HP. Sekarang link
+            // diterjemahkan dulu menjadi JID, dan groupnya didaftarkan
+            // sebagai TIDAK AKTIF supaya Forwarder tidak ikut mengirim ke sana.
+            if (/^(https?:\/\/)?chat\.whatsapp\.com\//i.test(arg)) {
+              if (!this.wa || !this.wa.isReady()) {
+                await this.bot.sendMessage(chatId,
+                  'WhatsApp belum siap, link undangan belum bisa diterjemahkan. '
+                  + 'Coba lagi setelah status WhatsApp "ready", atau isi JID-nya langsung.');
+                return true;
+              }
+              await this.bot.sendMessage(chatId, 'Menerjemahkan link undangan...');
+              let info;
+              try {
+                info = await this.wa.resolveInvite(arg);
+              } catch (err) {
+                await this.bot.sendMessage(chatId,
+                  `Link undangan tidak bisa dibaca: ${err.message}\n\n`
+                  + 'Pastikan bot sudah menjadi ANGGOTA group tersebut. '
+                  + 'Link undangan saja tidak membuat bot bergabung.');
+                return true;
+              }
+
+              const sudahAda = this.db.getWaGroupByGid(info.id);
+              if (!sudahAda) {
+                const baru = this.db.addWaGroup(info.id, info.name);
+                // addWaGroup selalu mengaktifkan; group lock stock harus PASIF
+                // agar tidak ikut menerima forward dari Telegram.
+                this.db.updateWaGroup(baru.id, { active: 0 });
+              }
+              const pesan = this.lock.setOpsi('groups', info.id);
+              const catatan = sudahAda && sudahAda.active
+                ? '\n\nPERHATIAN: group ini AKTIF di /groups, jadi Forwarder Telegram '
+                  + 'juga mengirim ke sana. Matikan (⚪) di /groups bila ingin terpisah.'
+                : '\n\nGroup didaftarkan sebagai TIDAK AKTIF di /groups, '
+                  + 'jadi Forwarder Telegram tidak ikut mengirim ke sana.';
+              await this.bot.sendMessage(chatId,
+                `Tersimpan. ${pesan}\nNama group: ${info.name}${catatan}`);
+              return true;
+            }
+
+            await this.bot.sendMessage(chatId, `Tersimpan. ${this.lock.setOpsi('groups', arg)}`);
             return true;
           }
 

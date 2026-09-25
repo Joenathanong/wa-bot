@@ -2083,6 +2083,27 @@ lalu di `/groups`, **matikan status aktif** group tersebut (⚪). Group yang
 tidak aktif tetap bisa menerima lock stock - yang dibaca lock adalah
 `lock_groups`, bukan status aktifnya.
 
+#### Cara paling ringkas: link undangan
+
+`/lockgroup` menerima **link undangan WhatsApp** langsung, jadi tidak perlu
+mencari JID lebih dulu:
+
+```
+/lockgroup https://chat.whatsapp.com/AbCdEf123456
+```
+
+Link diterjemahkan menjadi JID, dan bila groupnya belum terdaftar ia
+didaftarkan sebagai **TIDAK AKTIF** - dua langkah di atas selesai sekaligus,
+tanpa risiko Forwarder ikut mengirim ke sana. Bila group itu ternyata sudah
+AKTIF, statusnya **tidak** diubah diam-diam; yang muncul adalah peringatan
+agar Anda sendiri yang memutuskan.
+
+Syaratnya bot **sudah menjadi anggota** group tersebut. Link undangan hanya
+dibaca untuk mengambil identitas group - ia tidak membuat bot bergabung.
+
+`/lockgroup` tanpa argumen hanya menampilkan isi sekarang. Mengosongkan harus
+ditulis sengaja: `/lockgroup hapus`.
+
 Susunan yang benar:
 
 | Group | Status di /groups | Menerima |
