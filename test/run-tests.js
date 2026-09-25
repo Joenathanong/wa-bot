@@ -308,7 +308,7 @@ async function run() {
       { id: '120363022222222222@g.us', name: 'IEG Warehouse' },
     ],
     autoReady: true, requireQr: false, failStringMentions: false, failSend: false,
-    initErrorOnce: null, launches: [], failGetChats: false, failStore: false, storeEmpty: false, detached: false, lockedOnce: false, killed: 0, closed: 0, stuckAfterAuth: false, logoutOnStart: false,
+    initErrorOnce: null, launches: [], failGetChats: false, failStore: false, storeEmpty: false, detached: false, lockedOnce: false, lockedAlways: false, killed: 0, closed: 0, stuckAfterAuth: false, logoutOnStart: false,
     invites: { AbCdEf123456: { id: '120363033333333333@g.us', name: 'IEG Ops' } },
   };
 
@@ -1454,6 +1454,70 @@ async function run() {
     assert.strictEqual(wa.recoveries, sebelum + 1);
     assert.strictEqual(wa.isReady(), true, 'harus pulih walau profil sempat terkunci');
     assert.strictEqual(global.__WA_STUB__.lockedOnce, false, 'kunci sudah dilewati');
+  });
+
+  await test('Chrome yatim ikut dimatikan saat profil terkunci', async () => {
+    // Chrome dari proses Node sebelumnya tidak punya pegangan pupBrowser,
+    // jadi _forceKillBrowser() tidak bisa menyentuhnya. Tanpa langkah ini
+    // kunci profil tidak akan pernah lepas.
+    const wa3 = new WhatsAppService({
+      clientId: 'yatim',
+      sessionPath: path.join(os.tmpdir(), 'wa-test-yatim'),
+      healthCheckMs: 0, unlockDelayMs: 1, restartBaseMs: 10, readyTimeoutMs: 0,
+    });
+    let dipanggil = 0;
+    wa3._killOrphanBrowser = () => { dipanggil += 1; return 0; };
+    global.__WA_STUB__.lockedOnce = true;
+    try {
+      await wa3.start();
+      assert.strictEqual(dipanggil, 1, 'pencarian Chrome yatim harus dijalankan saat profil terkunci');
+    } finally {
+      global.__WA_STUB__.lockedOnce = false;
+      await wa3.stop();
+    }
+  });
+
+  await test('_killOrphanBrowser tidak menyapu Chrome milik pengguna', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'whatsapp.js'), 'utf8');
+    const mulai = src.indexOf('_killOrphanBrowser() {');
+    assert.ok(mulai > 0, 'metode _killOrphanBrowser harus ada');
+    const potong = src.slice(mulai, src.indexOf('_clearProfileLocks() {', mulai));
+    assert.ok(!/taskkill/i.test(potong), 'jangan pakai taskkill /IM chrome.exe - itu menutup Chrome pengguna');
+    assert.ok(/CommandLine.*Contains/.test(potong), 'harus menyaring berdasarkan jalur folder sesi');
+    assert.ok(/process\.platform !== 'win32'/.test(potong), 'hanya berlaku di Windows');
+  });
+
+  await test('kunci profil yang muncul lagi tetap dicoba dibuka, bukan menyerah selamanya', async () => {
+    // _triedUnlock dulu hanya di-reset saat ready / recover / logout. Bila
+    // percobaan membuka kunci yang pertama ikut gagal, setiap restart
+    // berikutnya melewati penanganan kunci - status tertinggal di 'failed'
+    // dan folder profil tidak pernah dibersihkan lagi.
+    const wa2 = new WhatsAppService({
+      clientId: 'kunci-berulang',
+      sessionPath: path.join(os.tmpdir(), 'wa-test-kunci'),
+      healthCheckMs: 0,
+      unlockDelayMs: 1,
+      restartBaseMs: 10,
+      readyTimeoutMs: 0,
+    });
+    let pembersihan = 0;
+    const asli = wa2._clearProfileLocks.bind(wa2);
+    wa2._clearProfileLocks = () => { pembersihan += 1; return asli(); };
+
+    global.__WA_STUB__.lockedAlways = true;
+    try {
+      await wa2.start();
+      assert.strictEqual(wa2.state, 'failed', 'percobaan pertama memang gagal');
+      assert.strictEqual(pembersihan, 1, 'sekali percobaan membuka kunci di putaran pertama');
+
+      await sleep(150);   // biarkan restart terjadwal berjalan
+      assert.ok(wa2._restartAttempts >= 1, 'restart harus dijadwalkan');
+      assert.ok(pembersihan >= 2,
+        `restart terjadwal harus mencoba membuka kunci lagi (baru ${pembersihan}x)`);
+    } finally {
+      global.__WA_STUB__.lockedAlways = false;
+      await wa2.stop();
+    }
   });
 
   await test('isBrowserLocked mengenali pesan profil terkunci', () => {

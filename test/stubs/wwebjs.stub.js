@@ -3,7 +3,7 @@ const EventEmitter = require('events');
 
 function state() {
   if (!global.__WA_STUB__) {
-    global.__WA_STUB__ = { sent: [], groups: [], autoReady: true, requireQr: false, failStringMentions: false, failSend: false, initErrorOnce: null, launches: [], failGetChats: false, failStore: false, invites: {}, detached: false, lockedOnce: false, killed: 0, closed: 0, stuckAfterAuth: false, logoutOnStart: false };
+    global.__WA_STUB__ = { sent: [], groups: [], autoReady: true, requireQr: false, failStringMentions: false, failSend: false, initErrorOnce: null, launches: [], failGetChats: false, failStore: false, invites: {}, detached: false, lockedOnce: false, lockedAlways: false, killed: 0, closed: 0, stuckAfterAuth: false, logoutOnStart: false };
   }
   return global.__WA_STUB__;
 }
@@ -29,6 +29,9 @@ class Client extends EventEmitter {
     const s = state();
     if (!Array.isArray(s.launches)) s.launches = [];
     s.launches.push((this.options.puppeteer && this.options.puppeteer.executablePath) || null);
+    if (s.lockedAlways) {
+      throw new Error('The browser is already running for C:\\x\\.wwebjs_auth\\session. Use a different `userDataDir` or stop the running browser first.');
+    }
     if (s.lockedOnce) {
       s.lockedOnce = false;
       throw new Error('The browser is already running for C:\\x\\.wwebjs_auth\\session-telegram-wa-bridge. Use a different `userDataDir` or stop the running browser first.');

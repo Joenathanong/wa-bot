@@ -94,11 +94,12 @@ const BROWSER_MISSING = /could not find chrome|could not find browser|failed to 
 class WhatsAppService extends EventEmitter {
   constructor({ clientId, sessionPath, chromePath = null, webVersion = null,
     browserFinder = findLocalBrowser, healthCheckMs = 60000, unlockDelayMs = 2500,
-    readyTimeoutMs = 120000 }) {
+    readyTimeoutMs = 120000, restartBaseMs = 15000 }) {
     super();
     this.healthCheckMs = healthCheckMs;
     this.unlockDelayMs = unlockDelayMs;
     this.readyTimeoutMs = readyTimeoutMs;
+    this.restartBaseMs = Math.max(1, restartBaseMs);
     this._readyTimer = null;
     this.stuckCount = 0;
     this._handlingLogout = false;
@@ -280,7 +281,14 @@ class WhatsAppService extends EventEmitter {
         this._triedUnlock = true;
         logger.warn('Profil Chrome masih terkunci proses lama - menutup paksa lalu mencoba lagi.');
         await this._forceKillBrowser();
+        // Urutannya penting: bunuh dulu prosesnya (termasuk yang yatim dari
+        // proses Node sebelumnya), BARU bersihkan berkas kuncinya.
+        const yatim = this._killOrphanBrowser();
+        if (yatim > 0) await sleep(this.unlockDelayMs);
         this._clearProfileLocks();
+        // _forceKillBrowser() sudah melepas this.client, jadi start()
+        // di bawah ini benar-benar berjalan ulang (bukan berhenti di
+        // penjaga "if (this.client) return" pada baris pertamanya).
         return this.start();
       }
 
@@ -308,10 +316,15 @@ class WhatsAppService extends EventEmitter {
   _scheduleRestart() {
     if (this._stopping || this._restartTimer) return;
     this._restartAttempts += 1;
-    const delay = Math.min(5 * 60000, 15000 * this._restartAttempts);
+    const delay = Math.min(5 * 60000, this.restartBaseMs * this._restartAttempts);
     logger.warn(`Mencoba menyambung ulang WhatsApp dalam ${Math.round(delay / 1000)} detik (percobaan ${this._restartAttempts})`);
     this._restartTimer = setTimeout(async () => {
       this._restartTimer = null;
+      // Kunci profil bisa muncul lagi kapan saja (proses Chrome menumpuk
+      // setelah beberapa kali recover). Tanpa reset ini, penanganan kunci
+      // hanya berlaku SEKALI seumur proses - sesudah itu setiap percobaan
+      // gagal tanpa pernah mencoba membuka kuncinya lagi.
+      this._triedUnlock = false;
       try {
         if (this.client) {
           try { await this.client.destroy(); } catch (e) { /* ignore */ }
@@ -456,6 +469,53 @@ class WhatsAppService extends EventEmitter {
     this.client = null;
     // Beri waktu sistem operasi melepas kunci folder profil.
     await sleep(this.unlockDelayMs);
+  }
+
+  /**
+   * Matikan Chrome YATIM yang masih memegang folder sesi.
+   *
+   * `_forceKillBrowser()` hanya bisa membunuh browser yang pegangannya
+   * masih kita miliki (`client.pupBrowser`). Bila proses Node sempat mati
+   * atau di-restart sementara Chrome-nya tetap hidup, pegangan itu hilang
+   * selamanya - Chrome yatim itu terus memegang kunci profil, dan setiap
+   * percobaan berikutnya ditolak dengan "The browser is already running".
+   * Menghapus berkas SingletonLock TIDAK menolong: yang mengunci adalah
+   * prosesnya, bukan berkasnya.
+   *
+   * Karena itu di sini prosesnya dicari lewat sistem operasi dan dimatikan.
+   * Pencocokan memakai jalur folder sesi, JADI Chrome milik pengguna tidak
+   * ikut terbunuh - berbeda dengan `taskkill /IM chrome.exe` yang menyapu
+   * semuanya.
+   * @returns {number} jumlah proses yang dimatikan
+   */
+  _killOrphanBrowser() {
+    if (process.platform !== 'win32') return 0;
+    let target;
+    try { target = fs.realpathSync(this.sessionPath); }
+    catch (e) { target = path.resolve(this.sessionPath); }
+
+    const { execFileSync } = require('child_process');
+    // Jalur dikirim lewat variabel lingkungan supaya tanda kutip dan
+    // backslash di dalamnya tidak perlu di-escape ke dalam perintah.
+    const skrip = "$p = $env:WA_SESSION_PATH; "
+      + "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+      + "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($p) } | "
+      + "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $_.ProcessId }";
+    try {
+      const keluar = execFileSync(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-Command', skrip],
+        { encoding: 'utf8', timeout: 20000, env: { ...process.env, WA_SESSION_PATH: target } }
+      );
+      const pids = String(keluar).split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+      if (pids.length > 0) {
+        logger.warn(`Chrome yatim yang memegang folder sesi dimatikan: pid ${pids.join(', ')}`);
+      }
+      return pids.length;
+    } catch (err) {
+      logger.warn('Tidak bisa mencari Chrome yatim lewat PowerShell:', err.message);
+      return 0;
+    }
   }
 
   /** Hapus berkas kunci profil Chrome yang tertinggal dari proses yang sudah mati. */

@@ -1279,6 +1279,46 @@ Log lebih detail: set `LOG_LEVEL=debug` di `.env` lalu restart.
 
 ---
 
+### 18.x WhatsApp "failed" berulang: `The browser is already running`
+
+Gejala di `data/app.log`, berulang dengan jeda yang makin panjang
+(60 dtk, 75, 90, 105 ... sampai 5 menit):
+
+```
+[ERROR] [WA] Gagal menjalankan klien WhatsApp: The browser is already running
+for ...\.wwebjs_auth\session-telegram-wa-bridge.
+```
+
+Penyebabnya **proses Chrome yatim**: Node mati atau di-restart sementara
+Chrome-nya tetap hidup. Chrome itu terus memegang folder profil, dan
+`_forceKillBrowser()` tidak bisa menyentuhnya karena pegangan `pupBrowser`
+ikut hilang bersama proses Node yang lama. Menghapus `SingletonLock` tidak
+menolong - yang mengunci prosesnya, bukan berkasnya.
+
+Dua penanganan sudah ada di aplikasi:
+
+1. `_killOrphanBrowser()` mencari `chrome.exe` yang baris perintahnya memuat
+   jalur folder sesi, lalu mematikannya. Penyaringan ini disengaja agar
+   Chrome milik pengguna tidak ikut tertutup - jangan diganti dengan
+   `taskkill /IM chrome.exe`.
+2. `_triedUnlock` di-reset pada setiap restart terjadwal, supaya kunci yang
+   muncul lagi tetap dicoba dibuka. Sebelumnya penanganan kunci hanya
+   berlaku SEKALI seumur proses.
+
+Bila perlu dibereskan manual, jalankan PowerShell **sebagai Administrator**
+dan perhatikan urutannya - service dimatikan lebih dulu, kalau tidak ia
+langsung menyalakan Chrome baru:
+
+```powershell
+net stop telegramwabridge.exe
+Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" |
+  Where-Object { $_.CommandLine -like '*wa-bot\.wwebjs_auth*' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+net start telegramwabridge.exe
+```
+
+---
+
 ## 19. Backup database
 
 Seluruh data (user, template, group, riwayat anti-duplikat) ada di satu file:
