@@ -970,8 +970,17 @@ class WhatsAppService extends EventEmitter {
     } catch (err) {
       // Beberapa versi whatsapp-web.js lama meminta objek Contact,
       // bukan string JID, pada opsi mentions.
+      //
+      // PENTING: galat PERTAMA itulah sebabnya, dan dialah yang harus terbaca.
+      // Dulu ia cuma logger.warn lalu ditelan; yang sampai ke layar user adalah
+      // galat dari percobaan kedua ("Data passed to getter must include an id
+      // property") — pesan internal WhatsApp Web yang terbaca seperti masalah id
+      // group, padahal group-nya tidak ada hubungannya. Berjam-jam habis di situ.
       if (options.mentions) {
-        logger.warn('Pengiriman dengan JID string gagal, mencoba memakai objek Contact:', err.message);
+        logger.error(
+          `Kirim dengan JID string GAGAL ke ${chatId} (${options.mentions.length} mention). `
+          + `Ini sebab aslinya: ${err.message}`
+        );
         const contacts = [];
         for (const jid of options.mentions) {
           try { contacts.push(await this.client.getContactById(jid)); } catch (e) {
@@ -979,9 +988,15 @@ class WhatsAppService extends EventEmitter {
           }
         }
         if (contacts.length > 0) {
-          const msg = await this.client.sendMessage(chatId, text, { mentions: contacts });
-          logger.info(`Pesan terkirim ke ${chatId} dengan ${contacts.length} mention (mode Contact)`);
-          return msg;
+          try {
+            const msg = await this.client.sendMessage(chatId, text, { mentions: contacts });
+            logger.info(`Pesan terkirim ke ${chatId} dengan ${contacts.length} mention (mode Contact)`);
+            return msg;
+          } catch (err2) {
+            // Cadangan ikut gagal: lempar galat ASLI, bukan galat cadangan.
+            logger.error(`Mode Contact juga gagal: ${err2.message}`);
+            throw new Error(`${err.message} (mode Contact juga gagal: ${err2.message})`);
+          }
         }
       }
       if (isContextLost(err)) {

@@ -613,12 +613,24 @@ class DoiScheduler {
             () => this.wa.sendImage(group.id, gambar),
             `DOI gambar -> ${group.name}`
           );
+          // GAMBARNYA SUDAH SAMPAI di titik ini. Teks menyusul terpisah, dan
+          // kegagalannya TIDAK BOLEH membatalkan hitungan gambar: dulu keduanya
+          // satu blok try, jadi mention yang gagal membuat laporan berbunyi
+          // "gagal ke seluruh group" padahal posternya sudah masuk ke group —
+          // orang lalu mencari-cari kesalahan di tempat yang salah.
+          terkirim += 1;
           if (String(teks.text || '').trim()) {
-            await this.queue.enqueue(
-              () => this.wa.sendText(group.id, teks.text, teks.mentions),
-              `DOI teks -> ${group.name} (${teks.mentions.length} mention)`
-            );
+            try {
+              await this.queue.enqueue(
+                () => this.wa.sendText(group.id, teks.text, teks.mentions),
+                `DOI teks -> ${group.name} (${teks.mentions.length} mention)`
+              );
+            } catch (errTeks) {
+              gagal.push(`${group.name}: gambar TERKIRIM, teks gagal - ${errTeks.message}`);
+              logger.error(`Teks DOI gagal ke "${group.name}" (gambar sudah terkirim): ${errTeks.message}`);
+            }
           }
+          continue;
         }
         terkirim += 1;
       } catch (err) {
