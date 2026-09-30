@@ -993,6 +993,58 @@ class WhatsAppService extends EventEmitter {
     }
   }
 
+  /**
+   * Browser Chrome yang sedang dipakai WhatsApp Web.
+   *
+   * Dipakai jalur Monitoring DOI untuk merender SVG menjadi gambar TANPA
+   * memasang perender tambahan: Chrome-nya sudah ada di mesin yang sama.
+   * Yang dibagikan hanya BROWSER-nya, bukan halaman WhatsApp Web - pemakainya
+   * membuka halaman baru sendiri lalu menutupnya.
+   */
+  browser() {
+    if (!this.client) return null;
+    return this.client.pupBrowser || null;
+  }
+
+  /**
+   * Kirim gambar ke sebuah chat/group.
+   *
+   * @param {string} chatId
+   * @param {{buffer: Buffer, mimetype: string, nama?: string}} gambar
+   * @param {{caption?: string, mentions?: string[]}} opsi
+   */
+  async sendImage(chatId, gambar, opsi = {}) {
+    if (!this.isReady()) throw new Error('WhatsApp belum siap - gambar tidak dikirim');
+    if (!chatId) throw new Error('Target WhatsApp Group belum dipilih (buka /groups)');
+    if (!gambar || !gambar.buffer || gambar.buffer.length === 0) throw new Error('Gambar kosong');
+
+    let MessageMedia = null;
+    try { ({ MessageMedia } = require('whatsapp-web.js')); } catch (e) { /* ditangani di bawah */ }
+    const isi = Buffer.from(gambar.buffer).toString('base64');
+    const media = MessageMedia
+      ? new MessageMedia(gambar.mimetype || 'image/png', isi, gambar.nama || 'gambar.png')
+      : { mimetype: gambar.mimetype || 'image/png', data: isi, filename: gambar.nama || 'gambar.png' };
+
+    const kirimOpsi = {};
+    if (opsi.caption) kirimOpsi.caption = opsi.caption;
+    if (Array.isArray(opsi.mentions) && opsi.mentions.length > 0) kirimOpsi.mentions = opsi.mentions;
+
+    try {
+      const msg = await this.client.sendMessage(chatId, media, kirimOpsi);
+      logger.info(
+        `Gambar ${Math.round(gambar.buffer.length / 1024)} KB terkirim ke ${chatId}${tujuanNyata(msg, chatId)}`
+      );
+      return msg;
+    } catch (err) {
+      if (isContextLost(err)) {
+        logger.error('Pengiriman gambar gagal karena halaman WhatsApp Web terlepas - memulihkan koneksi.');
+        this.recover('gagal kirim gambar: halaman terlepas').catch(() => { /* sudah dicatat */ });
+        throw new Error('Halaman WhatsApp Web terlepas; koneksi sedang dipulihkan.');
+      }
+      throw err;
+    }
+  }
+
   status() {
     return {
       state: this.state,

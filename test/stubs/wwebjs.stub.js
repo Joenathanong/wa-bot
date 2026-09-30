@@ -8,6 +8,15 @@ function state() {
   return global.__WA_STUB__;
 }
 
+class MessageMedia {
+  constructor(mimetype, data, filename) {
+    this.mimetype = mimetype;
+    this.data = data;
+    this.filename = filename;
+    this.__isMedia = true;
+  }
+}
+
 class LocalAuth {
   constructor(opts) { this.opts = opts; }
 }
@@ -114,6 +123,15 @@ class Client extends EventEmitter {
     const s = state();
     if (s.detached) throw new Error("Attempted to use detached Frame 'CA81E69EF89524A061BBDC707F9991E3'.");
     if (s.failSend) throw new Error('stub: pengiriman gagal');
+    if (text && text.__isMedia) {
+      s.sent.push({
+        chatId,
+        media: { mimetype: text.mimetype, filename: text.filename, bytes: Buffer.from(text.data, 'base64').length },
+        caption: options.caption || '',
+        mentions: options.mentions || [],
+      });
+      return { id: { _serialized: `stub-media-${s.sent.length}` } };
+    }
     if (options.mentions && options.mentions.length && typeof options.mentions[0] === 'string' && s.failStringMentions) {
       throw new Error('stub: versi lama butuh objek Contact');
     }
@@ -122,4 +140,4 @@ class Client extends EventEmitter {
   }
 }
 
-module.exports = { Client, LocalAuth };
+module.exports = { Client, LocalAuth, MessageMedia };

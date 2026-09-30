@@ -404,6 +404,8 @@ Perintah yang tersedia:
 | `/wadiag` | admin | Diagnosa mengapa daftar group tidak terbaca |
 | `/keyword` | admin | Tampilkan keyword aktif |
 | `/tagall on\|off` | admin | Sentil SELURUH anggota group tujuan, bukan hanya user terdaftar |
+| `/doi` | admin | Ambil gambar DOI dari web & kirim sekarang (bab 24) |
+| `/doistatus` | admin | Pengaturan, PIC, jadwal Monitoring DOI |
 | `/batal` | admin | Batalkan input yang sedang berjalan |
 
 ---
@@ -2365,3 +2367,140 @@ mengirim menulis alasannya ke log:
 
 Sebelumnya baris itu tidak ada sama sekali - jadwal diam, log bersih,
 dan tidak ada satu pun petunjuk. Itu kelemahan yang sudah diperbaiki.
+
+
+---
+
+## 24. Monitoring DOI (jalur 5)
+
+Jalur ini tidak menarik data dari OCS seperti jalur 2-4. Sumbernya adalah
+**web Monitoring DOI**, yang sudah menyediakan tampilan siap-kirim sebagai
+SVG. Bot mengambil gambar itu, mengubahnya menjadi gambar biasa, lalu
+mengirimnya ke WhatsApp beserta teks pendamping.
+
+```
+web Monitoring DOI  →  GET .../api/public/wa/svg?k=TOKEN   (hanya membaca)
+        ↓  SVG
+render jadi PNG/JPG  →  sharp / Chrome / ImageMagick (yang pertama tersedia)
+        ↓
+Pesan 1 → group tujuan DOI : GAMBAR
+        ↓
+Pesan 2 → group tujuan DOI : teks pendamping + REAL mention PIC DOI
+```
+
+Semuanya berdiri sendiri: **group tujuan, daftar PIC, isi teks, dan jam
+kirim** punya setelan sendiri — tidak satu pun diwarisi dari jalur lain, dan
+semuanya bisa diubah dari Telegram tanpa mengedit berkas dan tanpa
+me-restart service.
+
+### 24.1 Menyiapkan sekali
+
+```
+/doiurl https://doi-monitor.vercel.app/api/public/wa/svg?k=TOKEN
+/doigroup DOI HARIAN            (atau JID / link undangan)
+/doipic Ibu Sandra, Bpk. Andi
+/doiwa 6285773479551, 628976245500
+/doijam 8,13,16
+/doion
+```
+
+Uji lebih dulu tanpa mengirim ke siapa pun:
+
+```
+npm run doi:test          # ambil SVG, render, simpan ke data/doi-test.png
+npm run doi:test -- --teks   # hanya cetak teks pendamping, tanpa jaringan
+```
+
+Sekali jalan manual (menembus tombol on/off dan jam kirim): `/doi`
+
+### 24.2 Perintah lengkap
+
+| Perintah | Fungsi |
+|---|---|
+| `/doi` | Ambil & kirim sekarang |
+| `/doistatus` | Pengaturan, PIC, perender terakhir, jadwal berikutnya |
+| `/doion`, `/doioff` | Nyalakan / matikan pengiriman berkala |
+| `/doijam 8,13,16` | Jam kirim (0-23, pisah koma). `/doijam hapus` mengosongkan |
+| `/doipic <Nama>` | PIC DOI, boleh lebih dari satu (pisah koma) |
+| `/doiwa <Nomor>` | Nomor PIC agar di-mention, **urut** sesuai `/doipic` |
+| `/doitext` | Ubah teks pendamping (boleh beberapa baris) |
+| `/doigroup` | Group tujuan — WAJIB, terpisah dari jalur lain |
+| `/doiurl` | URL + token sumber gambar |
+| `/doiformat png\|jpg` | Format gambar |
+| `/doilebar 1080` | Lebar gambar hasil render (200-2000 px) |
+| `/doicaption on\|off` | Teks jadi caption gambar, atau pesan kedua |
+
+### 24.3 Teks pendamping
+
+`/doitext` tanpa argumen menampilkan teks sekarang beserta pratinjaunya, lalu
+menunggu teks baru sebagai pesan biasa — jadi boleh beberapa baris, dengan
+format WhatsApp (`*tebal*`, `_miring_`). Kirim `reset` untuk kembali ke teks
+bawaan, `/batal` untuk membatalkan.
+
+| Placeholder | Diganti dengan |
+|---|---|
+| `{pic}` | Sapaan seluruh PIC DOI, dengan REAL mention bagi yang punya nomor |
+| `{datetime}` | `Rabu, 30 Sep 2026 09:15 WIB` |
+| `{tanggal}` | `Rabu, 30 Sep 2026` |
+| `{jam}` | `09:15 WIB` |
+
+PIC yang **belum** punya nomor tetap disapa dengan namanya, tetapi tidak
+menjadi mention. Itu disengaja: nama yang salah tulis lebih baik terlihat di
+pesan daripada hilang tanpa jejak. `/doistatus` menandainya dengan
+`[tanpa nomor]`.
+
+### 24.4 Kenapa teks jadi pesan kedua, bukan caption?
+
+Caption gambar di WhatsApp bisa memuat mention, tetapi pada banyak versi
+WhatsApp Web caption panjang terpotong dan mention di dalamnya tidak selalu
+berubah menjadi notifikasi. Dua pesan terpisah membuat gambarnya utuh dan
+mention PIC pasti bekerja. Yang tetap ingin satu pesan: `/doicaption on`.
+
+### 24.5 Perender gambar — tidak perlu memasang ImageMagick
+
+Petunjuk aslinya memakai `convert doi.svg doi.jpg` (ImageMagick). Itu bekerja
+di meja kerja, tetapi menjadikan pengiriman laporan bergantung pada satu
+program yang harus dipasang terpisah di PC produksi — dan di Windows yang baru
+diinstal, ImageMagick nyaris pasti belum ada.
+
+Aplikasi ini **sudah** membawa Chrome (dipakai WhatsApp Web), jadi perender SVG
+kelas satu sudah ada di mesin yang sama. Urutan yang dicoba:
+
+| Urutan | Perender | Catatan |
+|---|---|---|
+| 1 | `sharp` | Dipakai bila kebetulan terpasang; paling cepat |
+| 2 | **Chrome** | Browser yang sama dengan WhatsApp Web. **Tanpa pemasangan apa pun** — ini jalur utama di produksi |
+| 3 | ImageMagick | `magick` / `convert`, bila memang ada di PATH |
+
+Yang pertama berhasil dipakai, dan namanya dicatat: `/doistatus` menyebut
+`Perender terakhir`. Kalau hasil gambarnya aneh, itu petunjuk pertama.
+
+Halaman render dibuka sebagai **tab baru** di browser yang sama lalu ditutup
+lagi. Halaman WhatsApp Web tidak disentuh — membaginya akan merusak sesi.
+
+### 24.6 Keamanan token
+
+URL sumber memuat token, jadi diperlakukan seperti kredensial:
+
+- Disimpan di `.env` (`DOI_SVG_URL`) atau di database lewat `/doiurl`, **tidak
+  pernah di dalam kode**.
+- Setiap kali ditampilkan — `/doistatus`, `/doiurl`, log, pesan galat —
+  tokennya disamarkan menjadi `k=*****`.
+- Token yang ditolak server (HTTP 401/403) dilaporkan sebagai
+  "token DOI ditolak", **tanpa** menyertakan tokennya.
+- Berkas `src/doi-client.js` hanya berisi GET. Tidak ada satu pun jalur yang
+  bisa mengubah apa pun di sisi web DOI, dan ada uji otomatis yang menjaga itu.
+
+### 24.7 Troubleshooting
+
+| Gejala | Sebab & tindakan |
+|---|---|
+| `group tujuan DOI BELUM DISETEL` | Sengaja: jalur ini tidak mewarisi group jalur lain. `/doigroup <nama atau JID>` |
+| `token DOI ditolak (HTTP 403)` | Token kedaluwarsa atau salah. Ambil URL baru dari web DOI lalu `/doiurl` |
+| `balasan bukan SVG` | URL-nya halaman web, bukan endpoint SVG. Pastikan diakhiri `/api/public/wa/svg?k=…` |
+| `tidak ada perender SVG yang bisa dipakai` | WhatsApp belum tersambung (Chrome belum hidup). Tunggu status `ready`, atau `npm install sharp` |
+| Gambar terkirim, teks tidak | Teks kosong. `/doitext` lalu isi |
+| Tulisan di gambar berbayang | `/doiformat png` (JPG memang berbayang untuk tabel dan angka) |
+| Gambar terlalu kecil di HP | `/doilebar 1440` |
+| `/doi` berhasil tetapi jadwal diam | Tombolnya MATI atau jam belum disetel. `/doistatus` menjelaskannya, lalu `/doion` / `/doijam` |
+| Peringatan "group ini juga tujuan …" | Dua jalur menumpuk di satu group. Lihat `/tujuan` lalu pindahkan salah satunya |

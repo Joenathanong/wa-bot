@@ -12,6 +12,7 @@ const TelegramUserSource = require('./telegram-user');
 const OcsScheduler = require('./ocs-scheduler');
 const StockScheduler = require('./stock-scheduler');
 const LockScheduler = require('./lock-scheduler');
+const DoiScheduler = require('./doi-scheduler');
 const { pasangPengamanShutdown } = require('./shutdown-guard');
 const tujuan = require('./tujuan');
 const { KEYWORD } = require('./filter');
@@ -24,6 +25,7 @@ let tgUser = null;
 let ocs = null;
 let stock = null;
 let lock = null;
+let doi = null;
 let shuttingDown = false;
 
 function banner() {
@@ -302,6 +304,19 @@ async function main() {
     logger.info('Peringatan lock stock tidak aktif (LOCK_ENABLED belum true di .env).');
   }
 
+  // 10. Monitoring DOI: gambar dari web + teks pendamping
+  if (config.doi.enabled) {
+    doi = new DoiScheduler({
+      db, whatsapp: wa, queue, config,
+      notifyAdmins: (teks) => tg.notifyAdmins(teks),
+    });
+    tg.doi = doi;
+    if (tg.admin) tg.admin.doi = doi;
+    doi.start();
+  } else {
+    logger.info('Monitoring DOI tidak aktif (DOI_ENABLED belum true di .env).');
+  }
+
   await wa.start();
 
   logger.info('Aplikasi berjalan. Kirim /admin ke bot Telegram Anda untuk membuka Admin Menu.');
@@ -319,6 +334,7 @@ async function shutdown(signal) {
   try { if (ocs) ocs.stop(); } catch (e) { /* ignore */ }
   try { if (stock) stock.stop(); } catch (e) { /* ignore */ }
   try { if (lock) lock.stop(); } catch (e) { /* ignore */ }
+  try { if (doi) doi.stop(); } catch (e) { /* ignore */ }
   try { if (tgUser) await tgUser.stop(); } catch (e) { /* ignore */ }
   try { if (tg) await tg.stop(); } catch (e) { /* ignore */ }
   try { if (wa) await wa.stop(); } catch (e) { /* ignore */ }

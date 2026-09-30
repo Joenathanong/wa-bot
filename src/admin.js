@@ -41,6 +41,10 @@ class AdminMenu {
     this.pipeline = pipeline;
     this.startedAt = startedAt || Date.now();
     this.userSource = null;    // diisi index.js bila TELEGRAM_SOURCE memakai akun
+    this.ocs = null;           // diisi index.js (jalur 2)
+    this.stock = null;         // diisi index.js (jalur 3)
+    this.lock = null;          // diisi index.js (jalur 4)
+    this.doi = null;           // diisi index.js (jalur 5)
     this.states = new Map();   // `${chatId}:${userId}` -> {action, data, expiresAt}
     this.groupCache = [];      // hasil /groups terakhir (untuk callback pendek)
   }
@@ -971,6 +975,25 @@ class AdminMenu {
           await this._send(chatId, '✅ Nomor diperbarui.');
           const view = this.userDetailView(user);
           await this._send(chatId, view.text, view.keyboard);
+          return true;
+        }
+        case 'doi_text': {
+          // Teks pendamping Monitoring DOI. Dikirim sebagai pesan biasa,
+          // bukan argumen perintah, supaya boleh beberapa baris - teks satu
+          // baris tidak cukup untuk sebuah pesan operasional.
+          const isi = msg.text || '';
+          this.clearState(chatId, userId);
+          if (!this.doi) {
+            await this._send(chatId, '⚠️ Monitoring DOI tidak aktif di aplikasi ini.');
+            return true;
+          }
+          try {
+            const pesan = this.doi.setOpsi('teks', isi);
+            logger.info(`Teks Monitoring DOI diubah oleh admin ${userId}`);
+            await this._send(chatId, `✅ ${pesan}\n\nPratinjau:\n${this.doi.pratinjau()}`);
+          } catch (err) {
+            await this._send(chatId, `⚠️ Gagal: ${err.message}\n\nCoba lagi dengan /doitext.`);
+          }
           return true;
         }
         case 'edit_template': {

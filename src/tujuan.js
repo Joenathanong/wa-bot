@@ -23,6 +23,31 @@
  * tujuan forward.
  */
 
+/**
+ * Jalur selain Forwarder yang tujuannya DISEBUT satu per satu.
+ *
+ * Daftar ini satu-satunya tempat jalur baru perlu didaftarkan: pemisahan,
+ * ringkasan /tujuan, tanda 🔒 di /groups, dan pengaman saat mengaktifkan
+ * group semuanya membacanya dari sini. Menambah jalur ke-6 nanti cukup
+ * menambah satu baris - bukan menyebar aturan yang sama ke lima berkas.
+ */
+const JALUR = [
+  {
+    key: 'lock',
+    kunci: 'lock_groups',
+    config: 'lock',
+    judul: '4. PERINGATAN LOCK STOCK',
+    perintah: '/lockgroup',
+  },
+  {
+    key: 'doi',
+    kunci: 'doi_groups',
+    config: 'doi',
+    judul: '5. MONITORING DOI',
+    perintah: '/doigroup',
+  },
+];
+
 const KUNCI_LOCK_GROUPS = 'lock_groups';
 
 function daftarDariTeks(teks) {
@@ -48,25 +73,31 @@ function groupAktif(db) {
   try { return db.listActiveWaGroups() || []; } catch (e) { return []; }
 }
 
-/**
- * Pilihan mentah tujuan lock stock (boleh JID, boleh NAMA group),
- * persis seperti yang dibaca LockScheduler.opsi().groupIds.
- */
-function pilihanLock(db, config) {
-  const dasar = (config && config.lock && Array.isArray(config.lock.groupIds))
-    ? config.lock.groupIds.join(',')
-    : '';
-  return daftarDariTeks(ambilSetting(db, KUNCI_LOCK_GROUPS, dasar));
+function cariJalur(key) {
+  const j = JALUR.find((x) => x.key === key);
+  if (!j) throw new Error(`jalur "${key}" tidak dikenal`);
+  return j;
 }
 
 /**
- * Pilihan lock yang sudah diterjemahkan menjadi JID.
+ * Pilihan mentah tujuan sebuah jalur (boleh JID, boleh NAMA group),
+ * persis seperti yang dibaca penjadwalnya sendiri lewat opsi().groupIds.
+ */
+function pilihanJalur(db, config, key) {
+  const j = cariJalur(key);
+  const bagian = config && config[j.config];
+  const dasar = (bagian && Array.isArray(bagian.groupIds)) ? bagian.groupIds.join(',') : '';
+  return daftarDariTeks(ambilSetting(db, j.kunci, dasar));
+}
+
+/**
+ * Pilihan sebuah jalur yang sudah diterjemahkan menjadi JID.
  * Nama group dicocokkan tanpa peduli besar-kecil huruf; nama yang tidak
  * terdaftar di /groups sengaja dibuang - ia tidak menunjuk group mana pun,
  * jadi tidak mungkin bentrok dengan tujuan Forwarder.
  */
-function jidLock(db, config) {
-  const pilihan = pilihanLock(db, config);
+function jidJalur(db, config, key) {
+  const pilihan = pilihanJalur(db, config, key);
   if (pilihan.length === 0) return [];
   const semua = semuaGroup(db);
   const hasil = [];
@@ -77,6 +108,31 @@ function jidLock(db, config) {
     else if (/@g\.us$/i.test(p)) hasil.push(p);
   }
   return [...new Set(hasil)];
+}
+
+/** Seluruh JID yang sudah dipesan jalur mana pun selain Forwarder. */
+function jidSemuaJalur(db, config) {
+  const hasil = [];
+  for (const j of JALUR) {
+    for (const jid of jidJalur(db, config, j.key)) {
+      if (!hasil.includes(jid)) hasil.push(jid);
+    }
+  }
+  return hasil;
+}
+
+/* Nama lama, dipertahankan supaya pemanggil yang sudah ada tidak perlu ikut
+   diubah. jidLock kini berarti "seluruh jalur bertujuan-tetap", karena
+   itulah yang dibutuhkan setiap pemakainya: tanda 🔒 di /groups, pengaman
+   pengaktifan group, dan penyingkiran tujuan Forwarder. */
+function pilihanLock(db, config) {
+  const hasil = [];
+  for (const j of JALUR) hasil.push(...pilihanJalur(db, config, j.key));
+  return hasil;
+}
+
+function jidLock(db, config) {
+  return jidSemuaJalur(db, config);
 }
 
 /**
@@ -177,14 +233,35 @@ function ringkasan(db, config) {
     for (const g of peta.forwarder) baris.push(`  • ${g.name} (${g.id})`);
   }
 
-  baris.push('', '4. PERINGATAN LOCK STOCK');
-  if (!peta.lockDisetel) {
-    baris.push('  (belum disetel - peringatan tidak terkirim)');
-    baris.push('  Setel dengan: /lockgroup <link / JID / nama group>');
-  } else if (namaLock.length === 0) {
-    baris.push(`  (tujuan tidak dikenal: ${pilihanLock(db, config).join(', ')})`);
-  } else {
-    for (const n of namaLock) baris.push(`  • ${n}`);
+  for (const j of JALUR) {
+    baris.push('', j.judul);
+    const pilihan = pilihanJalur(db, config, j.key);
+    const jid = jidJalur(db, config, j.key);
+    if (pilihan.length === 0) {
+      baris.push('  (belum disetel - tidak terkirim)');
+      baris.push(`  Setel dengan: ${j.perintah} <link / JID / nama group>`);
+    } else if (jid.length === 0) {
+      baris.push(`  (tujuan tidak dikenal: ${pilihan.join(', ')})`);
+    } else {
+      for (const x of jid) {
+        const g = semuaGroup(db).find((y) => String(y.group_id) === x);
+        baris.push(`  • ${g ? `${g.name || x} (${x})` : x}`);
+      }
+    }
+  }
+
+  // Dua jalur bertujuan-tetap yang menunjuk group yang SAMA tidak tertangkap
+  // oleh pemeriksaan Forwarder di atas - keduanya boleh saja tidak aktif di
+  // /groups, dan tetap menumpuk di satu ruang.
+  const silang = [];
+  for (let a = 0; a < JALUR.length; a += 1) {
+    for (let b = a + 1; b < JALUR.length; b += 1) {
+      const kiri = jidJalur(db, config, JALUR[a].key);
+      const kanan = jidJalur(db, config, JALUR[b].key);
+      for (const x of kiri) {
+        if (kanan.includes(x)) silang.push({ jid: x, a: JALUR[a], b: JALUR[b] });
+      }
+    }
   }
 
   baris.push('');
@@ -193,23 +270,42 @@ function ringkasan(db, config) {
   } else if (peta.bentrok.length === 0) {
     baris.push('Status: ✅ BEDA - kedua jalur mengirim ke group yang berlainan.');
   } else {
-    const nama = peta.bentrok.map((g) => g.name).join(', ');
     const bisa = peta.forwarder.length > peta.bentrok.length;
-    baris.push(`Status: ⚠️ SAMA - group "${nama}" dipakai kedua jalur.`);
+    // Sebut jalur MANA yang mengklaim group itu. "dipakai kedua jalur" tidak
+    // cukup begitu ada lebih dari dua jalur - admin masih harus menebak.
+    const rinci = peta.bentrok.map((g) => {
+      const pemilik = JALUR
+        .filter((j) => jidJalur(db, config, j.key).includes(g.id))
+        .map((j) => j.judul);
+      return `"${g.name}" (Forwarder + ${pemilik.join(' + ') || 'jalur lain'})`;
+    }).join(', ');
+    baris.push(`Status: ⚠️ SAMA - ${rinci}.`);
     baris.push('');
     baris.push(bisa
       ? 'Group itu akan dinonaktifkan otomatis dari /groups supaya Forwarder '
         + 'berhenti mengirim ke sana.'
       : 'Ini satu-satunya group aktif, jadi TIDAK dipisah otomatis - forward '
         + 'pesanan tidak boleh berhenti. Pilih salah satu:\n'
-        + '  a) /lockgroup <group lain>  - pindahkan peringatan lock stock, atau\n'
+        + '  a) pindahkan jalur itu ke group lain, atau\n'
         + '  b) tambah group baru di /groups lalu nonaktifkan yang ini.');
+  }
+
+  for (const x of silang) {
+    const g = semuaGroup(db).find((y) => String(y.group_id) === x.jid);
+    baris.push('');
+    baris.push(`⚠️ "${g ? (g.name || x.jid) : x.jid}" dipakai DUA jalur sekaligus: `
+      + `${x.a.judul} dan ${x.b.judul}. Pindahkan salah satunya `
+      + `(${x.a.perintah} / ${x.b.perintah}).`);
   }
   return baris.join('\n');
 }
 
 module.exports = {
+  JALUR,
   KUNCI_LOCK_GROUPS,
+  pilihanJalur,
+  jidJalur,
+  jidSemuaJalur,
   pilihanLock,
   jidLock,
   petaTujuan,

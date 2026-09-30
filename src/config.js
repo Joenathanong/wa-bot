@@ -243,6 +243,21 @@ const config = {
   // Berjalan sebagai penjadwal sendiri, terpisah dari jalur Telegram
   // maupun dari laporan OCS/stok. Hampir semua nilai bisa diubah lewat
   // Menu Admin Telegram dan tersimpan di database.
+  // ---------------- 5. MONITORING DOI (gambar dari web) --------------
+  // URL memuat TOKEN, jadi diperlakukan seperti kredensial: tidak pernah
+  // ditampilkan mentah di Telegram maupun log (lihat doi-client.samarkanUrl).
+  doi: {
+    enabled: /^(1|true|ya|on)$/i.test(String(process.env.DOI_ENABLED || '').trim()),
+    url: (process.env.DOI_SVG_URL || '').trim(),
+    hours: parseJamList(process.env.DOI_HOURS, ""),
+    groupIds: parseIdList(process.env.DOI_GROUP_IDS),
+    format: (process.env.DOI_IMAGE_FORMAT || 'png').trim().toLowerCase(),
+    lebar: toInt(process.env.DOI_IMAGE_WIDTH, 1080),
+    caption: /^(1|true|ya|on)$/i.test(String(process.env.DOI_CAPTION || '').trim()),
+    timeoutMs: toInt(process.env.DOI_TIMEOUT_MS, 20000),
+    teks: process.env.DOI_TEXT || '',
+  },
+
   lock: {
     enabled: String(process.env.LOCK_ENABLED || 'false').toLowerCase() === 'true',
 

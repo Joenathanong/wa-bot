@@ -19,6 +19,10 @@ class TelegramService {
     this.pipeline = null;
     this.admin = null;
     this.connected = false;
+    this.ocs = null;           // diisi index.js (jalur 2)
+    this.stock = null;         // diisi index.js (jalur 3)
+    this.lock = null;          // diisi index.js (jalur 4)
+    this.doi = null;           // diisi index.js (jalur 5)
   }
 
   async start() {
@@ -170,7 +174,7 @@ class TelegramService {
         const umum = [
           '*BOT GUDANG - IEG*',
           '',
-          'Empat bot berdiri sendiri di dalam satu aplikasi.',
+          'Lima bot berdiri sendiri di dalam satu aplikasi.',
           'Masing-masing punya tombol on/off dan group tujuan sendiri.',
           '',
           '*UMUM*',
@@ -242,13 +246,31 @@ class TelegramService {
           '/lockulang on|off - ulangi pesan yang sama tiap jam?',
         ];
 
+        const doi = [
+          '',
+          '*5. MONITORING DOI*',
+          '_Gambar DOI ditarik dari web Monitoring DOI, dikirim sebagai_',
+          '_gambar, lalu disusul teks pendamping berisi mention PIC._',
+          '/doi        - ambil & kirim sekarang',
+          '/doistatus  - pengaturan, PIC, jadwal berikutnya',
+          '/doion, /doioff - nyalakan / matikan pengiriman berkala',
+          '/doijam 8,13,16 - jam kirim (0-23, pisah koma)',
+          '/doipic <Nama>  - PIC DOI (boleh >1, pisah koma)',
+          '/doiwa <Nomor>  - nomor PIC agar di-mention (urut, pisah koma)',
+          '/doitext        - ubah teks pendamping (boleh beberapa baris)',
+          '/doigroup       - group tujuan (WAJIB, terpisah dari jalur lain)',
+          '/doiurl         - URL + token sumber gambar',
+          '/doiformat png|jpg, /doilebar 1080 - bentuk gambar',
+          '/doicaption on|off - teks jadi caption gambar atau pesan kedua',
+        ];
+
         const kaki = isAdmin
           ? ['', '_Uji tanpa mengirim ke WhatsApp:_',
-             '_npm run ocs:test | stock:test | lock:test_']
+             '_npm run ocs:test | stock:test | lock:test | doi:test_']
           : ['', 'Anda bukan administrator bot ini.'];
 
         const baris = isAdmin
-          ? [...umum, ...forwarder, ...fulfilment, ...stok, ...lock, ...kaki]
+          ? [...umum, ...forwarder, ...fulfilment, ...stok, ...lock, ...doi, ...kaki]
           : [...umum, ...kaki];
 
         await this.bot.sendMessage(chatId, baris.join('\n'), { parse_mode: 'Markdown' });
@@ -785,6 +807,246 @@ class TelegramService {
           }
         } catch (err) {
           await this.bot.sendMessage(chatId, `Gagal: ${err.message}`);
+          return true;
+        }
+        return true;
+      }
+
+      /* ---------------- 5. MONITORING DOI (gambar + teks) ------------- */
+      case '/doi':
+      case '/doistatus':
+      case '/doion':
+      case '/doioff':
+      case '/doijam':
+      case '/doipic':
+      case '/doiwa':
+      case '/doigroup':
+      case '/doitext':
+      case '/doiurl':
+      case '/doiformat':
+      case '/doilebar':
+      case '/doicaption': {
+        if (!this.config.isAdmin(userId)) {
+          await this.bot.sendMessage(chatId, require('./admin').DENIED);
+          return true;
+        }
+        if (!this.doi) {
+          await this.bot.sendMessage(chatId,
+            'Monitoring DOI tidak aktif. Isi DOI_ENABLED=true di file .env lalu jalankan ulang aplikasi.');
+          return true;
+        }
+        const nilaiDoi = text.slice(cmd.length).replace(/^@\S+/, '').trim();
+
+        if (cmd === '/doi') {
+          await this.bot.sendMessage(chatId, 'Mengambil gambar DOI dari web lalu mengirim ke WhatsApp...');
+          const hasil = await this.doi.runOnce({ paksa: true });
+          if (hasil.status === 'sent') {
+            await this.bot.sendMessage(chatId,
+              `Terkirim ke ${hasil.groups} group WhatsApp.\n`
+              + `Gambar dirender lewat ${hasil.cara} (${Math.round(hasil.bytes / 1024)} KB).\n\n`
+              + `Teks pendamping:\n${hasil.text}`);
+          } else {
+            await this.bot.sendMessage(chatId, `Tidak terkirim - ${hasil.reason || hasil.status}`);
+          }
+          return true;
+        }
+
+        if (cmd === '/doistatus') {
+          await this.bot.sendMessage(chatId, this.doi.ringkasanStatus());
+          return true;
+        }
+
+        if (cmd === '/doion' || cmd === '/doioff') {
+          const nyalakan = cmd === '/doion';
+          this.doi.setEnabled(nyalakan);
+          await this.bot.sendMessage(chatId, nyalakan
+            ? 'Monitoring DOI DIAKTIFKAN. Terkirim otomatis pada jam yang disetel (/doijam).'
+            : 'Monitoring DOI DIMATIKAN. Pakai /doi untuk mengirim sekali secara manual.');
+          return true;
+        }
+
+        if (cmd === '/doipic' || cmd === '/doiwa') {
+          try {
+            const pesan = cmd === '/doipic'
+              ? this.doi.setPicNama(nilaiDoi)
+              : this.doi.setPicNomor(nilaiDoi);
+            await this.bot.sendMessage(chatId, `Tersimpan. ${pesan}`);
+          } catch (err) {
+            await this.bot.sendMessage(chatId, `Gagal: ${err.message}\n\n`
+              + (cmd === '/doipic'
+                ? 'Contoh: /doipic Ibu Sandra, Bpk. Andi\n'
+                  + 'Perintah ini mengganti SELURUH daftar PIC DOI.\n'
+                  + 'Kosongkan untuk membuang sapaan.'
+                : 'Contoh: /doiwa 6281234567890, 6289876543210\n'
+                  + 'Urut sesuai nama di /doipic. "kosong" untuk melewati satu orang.'));
+          }
+          return true;
+        }
+
+        if (cmd === '/doitext') {
+          // Tanpa argumen: tampilkan teks sekarang + pratinjaunya, JANGAN
+          // langsung mengosongkan. Teks kosong berarti hanya gambar terkirim -
+          // terlalu mudah terjadi tanpa disadari.
+          if (!nilaiDoi) {
+            this.admin.setState(chatId, userId, 'doi_text');
+            await this.bot.sendMessage(chatId, [
+              '✏️ TEKS PENDAMPING DOI',
+              '',
+              'Teks sekarang:',
+              '──────────',
+              this.doi.opsi().teks || '(kosong)',
+              '──────────',
+              '',
+              'Pratinjau (seperti yang akan dikirim):',
+              this.doi.pratinjau(),
+              '',
+              'Kirim teks baru sekarang (boleh beberapa baris).',
+              'Placeholder: {pic} {datetime} {tanggal} {jam}',
+              '',
+              'Ketik "reset" untuk kembali ke teks bawaan, /batal untuk membatalkan.',
+            ].join('\n'));
+            return true;
+          }
+          try {
+            await this.bot.sendMessage(chatId, `Tersimpan. ${this.doi.setOpsi('teks', nilaiDoi)}`);
+          } catch (err) {
+            await this.bot.sendMessage(chatId, `Gagal: ${err.message}`);
+          }
+          return true;
+        }
+
+        if (cmd === '/doigroup') {
+          if (!nilaiDoi) {
+            const sekarang = this.doi.targetGroups();
+            await this.bot.sendMessage(chatId, [
+              '📌 GROUP TUJUAN MONITORING DOI',
+              '',
+              sekarang.length
+                ? `Sekarang: ${sekarang.map((g) => `${g.name} (${g.id})`).join(', ')}`
+                : 'Sekarang: BELUM DISETEL - laporan DOI tidak akan terkirim.',
+              '',
+              'Cara isi (pilih salah satu):',
+              '  /doigroup https://chat.whatsapp.com/AbCdEf123456',
+              '  /doigroup 120363011111111111@g.us',
+              '  /doigroup Nama Group DOI',
+              '',
+              'Link undangan otomatis diterjemahkan jadi JID, dan groupnya',
+              'didaftarkan TIDAK AKTIF supaya Forwarder tidak ikut mengirim.',
+              'Syaratnya bot sudah menjadi ANGGOTA group tersebut.',
+              'Daftar group beserta JID-nya ada di /groups.',
+              'Group ini HARUS berbeda dari group jalur lain - bandingkan di /tujuan.',
+              '',
+              'Untuk mengosongkan dengan sengaja: /doigroup hapus',
+            ].join('\n'));
+            return true;
+          }
+          if (/^(hapus|kosong|kosongkan|clear)$/i.test(nilaiDoi)) {
+            await this.bot.sendMessage(chatId, `Tersimpan. ${this.doi.setOpsi('groups', '')}`);
+            return true;
+          }
+
+          let targetDoi = nilaiDoi;
+          if (/^(https?:\/\/)?chat\.whatsapp\.com\//i.test(nilaiDoi)) {
+            if (!this.wa || !this.wa.isReady()) {
+              await this.bot.sendMessage(chatId,
+                'WhatsApp belum siap, link undangan belum bisa diterjemahkan. '
+                + 'Coba lagi setelah status WhatsApp "ready", atau isi JID-nya langsung.');
+              return true;
+            }
+            await this.bot.sendMessage(chatId, 'Menerjemahkan link undangan...');
+            let info;
+            try {
+              info = await this.wa.resolveInvite(nilaiDoi);
+            } catch (err) {
+              await this.bot.sendMessage(chatId,
+                `Link undangan tidak bisa dibaca: ${err.message}\n\n`
+                + 'Pastikan bot sudah menjadi ANGGOTA group tersebut. '
+                + 'Link undangan saja tidak membuat bot bergabung.');
+              return true;
+            }
+            if (!this.db.getWaGroupByGid(info.id)) {
+              const baru = this.db.addWaGroup(info.id, info.name);
+              // addWaGroup selalu mengaktifkan; group DOI harus PASIF agar
+              // tidak ikut menerima forward dari Telegram.
+              this.db.updateWaGroup(baru.id, { active: 0 });
+            }
+            targetDoi = info.id;
+          }
+
+          let pesanDoi;
+          try {
+            pesanDoi = this.doi.setOpsi('groups', targetDoi);
+          } catch (err) {
+            await this.bot.sendMessage(chatId, `Gagal: ${err.message}`);
+            return true;
+          }
+          // Pemisahan dikerjakan di tempat pilihannya dibuat - sama seperti
+          // /lockgroup. Tanpa ini, group DOI yang kebetulan aktif di /groups
+          // akan menerima dua jalur sekaligus tanpa ada tanda apa pun.
+          const pisahDoi = tujuan.pisahkanOtomatis(this.db, this.config);
+          let catatanDoi = '';
+          if (pisahDoi.dipisah.length > 0) {
+            const nama = pisahDoi.dipisah.map((g) => g.name).join(', ');
+            logger.info(`Group "${nama}" dinonaktifkan dari forwarder karena dijadikan tujuan DOI`);
+            if (this.pipeline) this.pipeline.lupakanAnggota();
+            catatanDoi = `\n\nGroup "${nama}" otomatis DINONAKTIFKAN di /groups, `
+              + 'jadi Forwarder Telegram tidak ikut mengirim ke sana.';
+          } else if (pisahDoi.tidakBisaDipisah) {
+            catatanDoi = '\n\nPERHATIAN: group ini satu-satunya group AKTIF di /groups, jadi '
+              + 'Forwarder Telegram masih ikut mengirim ke sana. Tambah group lain di /groups, '
+              + 'atau pilih group lain untuk DOI.';
+          }
+          const bentrokDoi = this.doi.groupBentrok().filter((b) => b.jalur !== 'Forwarder Telegram');
+          if (bentrokDoi.length > 0) {
+            catatanDoi += `\n\nPERHATIAN: group ini juga tujuan ${bentrokDoi[0].jalur}. `
+              + 'Pindahkan salah satunya supaya dua jalur tidak menumpuk - lihat /tujuan.';
+          }
+          await this.bot.sendMessage(chatId, `Tersimpan. ${pesanDoi}${catatanDoi}`);
+          return true;
+        }
+
+        if (cmd === '/doiurl') {
+          if (!nilaiDoi) {
+            const o = this.doi.opsi();
+            await this.bot.sendMessage(chatId, [
+              '🔗 SUMBER GAMBAR DOI',
+              '',
+              `Sekarang: ${require('./doi-client').samarkanUrl(o.url)}`,
+              '',
+              'URL ini memuat TOKEN, jadi tokennya selalu disamarkan di sini',
+              'maupun di log. Isi dengan URL lengkap:',
+              '',
+              '  /doiurl https://doi-monitor.vercel.app/api/public/wa/svg?k=TOKEN',
+              '',
+              'Untuk mengosongkan: /doiurl hapus',
+            ].join('\n'));
+            return true;
+          }
+          try {
+            await this.bot.sendMessage(chatId, `Tersimpan. ${this.doi.setOpsi('url', nilaiDoi)}`);
+          } catch (err) {
+            await this.bot.sendMessage(chatId, `Gagal: ${err.message}`);
+          }
+          return true;
+        }
+
+        if (cmd === '/doijam' || cmd === '/doiformat' || cmd === '/doilebar' || cmd === '/doicaption') {
+          const peta = { '/doijam': 'hours', '/doiformat': 'format', '/doilebar': 'lebar', '/doicaption': 'caption' };
+          const bantuan = {
+            '/doijam': 'Contoh: /doijam 8,13,16  (jam 0-23, dipisah koma)\nKosongkan jadwal: /doijam hapus',
+            '/doiformat': 'Contoh: /doiformat png  atau  /doiformat jpg',
+            '/doilebar': 'Contoh: /doilebar 1080  (200 - 2000 piksel)',
+            '/doicaption': 'Contoh: /doicaption on  (teks jadi caption gambar)\n/doicaption off (teks jadi pesan kedua - disarankan)',
+          };
+          if (!nilaiDoi) {
+            await this.bot.sendMessage(chatId, bantuan[cmd]);
+            return true;
+          }
+          try {
+            await this.bot.sendMessage(chatId, `Tersimpan. ${this.doi.setOpsi(peta[cmd], nilaiDoi)}`);
+          } catch (err) {
+            await this.bot.sendMessage(chatId, `Gagal: ${err.message}\n\n${bantuan[cmd]}`);
+          }
           return true;
         }
         return true;

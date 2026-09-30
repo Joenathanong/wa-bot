@@ -4296,6 +4296,456 @@ async function run() {
     assert.strictEqual(t.terkirim[1].mentions.length, 3);
   });
 
+  /* ============ 15. Monitoring DOI: gambar dari web + teks ========== */
+  section('15. Monitoring DOI (jalur 5)');
+
+  const DoiScheduler = require('../src/doi-scheduler');
+  const doiClient = require('../src/doi-client');
+  const doiImage = require('../src/doi-image');
+
+  /* ---- URL & token ---- */
+  await test('token di URL DOI selalu disamarkan', () => {
+    assert.strictEqual(
+      doiClient.samarkanUrl('https://doi-monitor.vercel.app/api/public/wa/svg?k=RAHASIA'),
+      'https://doi-monitor.vercel.app/api/public/wa/svg?k=*****'
+    );
+    assert.strictEqual(doiClient.samarkanUrl('https://x.id/a?token=abc&mode=wa'),
+      'https://x.id/a?token=*****&mode=wa');
+    assert.ok(!doiClient.samarkanUrl('https://x.id/a?k=RAHASIA').includes('RAHASIA'));
+  });
+
+  await test('URL tak sah tidak pernah ditampilkan mentah', () => {
+    // Justru teks tak-sah inilah yang paling sering memuat token salah tempel.
+    assert.strictEqual(doiClient.samarkanUrl('k=RAHASIA salah tempel'), '(URL tidak sah)');
+    assert.strictEqual(doiClient.samarkanUrl(''), '(belum disetel)');
+  });
+
+  await test('penyamaran tidak meng-encode ulang query', () => {
+    const hasil = doiClient.samarkanUrl('https://x.id/a?k=T&b=1 2');
+    assert.ok(!hasil.includes('%E2%80%A2'), 'tanda samar tidak boleh jadi persen-encoding');
+  });
+
+  /* ---- ukuran SVG ---- */
+  await test('ukuran SVG dibaca dari width/height maupun viewBox', () => {
+    assert.deepStrictEqual(doiClient.ukuranSvg('<svg width="640px" height="480">'), { width: 640, height: 480 });
+    assert.deepStrictEqual(doiClient.ukuranSvg('<svg viewBox="0 0 1200 900">'), { width: 1200, height: 900 });
+    assert.strictEqual(doiClient.ukuranSvg('<svg>'), null);
+  });
+
+  await test('render menjaga rasio, tidak menggepengkan gambar', () => {
+    const u = doiImage.hitungUkuran('<svg viewBox="0 0 1200 600">', 600);
+    assert.strictEqual(u.width, 600);
+    assert.strictEqual(u.height, 300, 'tinggi mengikuti rasio asli');
+    const batas = doiImage.hitungUkuran('<svg viewBox="0 0 100 100">', 99999);
+    assert.ok(batas.width <= 2000, 'lebar dibatasi supaya gambar tidak raksasa');
+  });
+
+  /* ---- pengambilan lewat HTTP (server lokal, tanpa internet) ---- */
+  const httpLokal = require('http');
+  function serverUji(tangani) {
+    return new Promise((resolve) => {
+      const srv = httpLokal.createServer(tangani);
+      srv.listen(0, '127.0.0.1', () => resolve({ srv, port: srv.address().port }));
+    });
+  }
+
+  await test('SVG diambil dari endpoint dengan benar', async () => {
+    const { srv, port } = await serverUji((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
+      res.end('<svg viewBox="0 0 100 50"><rect width="100" height="50"/></svg>');
+    });
+    try {
+      const hasil = await doiClient.ambilSvg(`http://127.0.0.1:${port}/svg?k=T`);
+      assert.ok(hasil.svg.includes('<svg'));
+      assert.ok(hasil.bytes > 0);
+    } finally { srv.close(); }
+  });
+
+  await test('pengalihan (redirect) diikuti', async () => {
+    const { srv, port } = await serverUji((req, res) => {
+      if (req.url.startsWith('/awal')) {
+        res.writeHead(302, { Location: '/akhir' });
+        return res.end();
+      }
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
+      return res.end('<svg viewBox="0 0 10 10"></svg>');
+    });
+    try {
+      const hasil = await doiClient.ambilSvg(`http://127.0.0.1:${port}/awal`);
+      assert.ok(hasil.svg.includes('<svg'));
+    } finally { srv.close(); }
+  });
+
+  await test('token ditolak (403) dijelaskan apa adanya', async () => {
+    const { srv, port } = await serverUji((req, res) => { res.writeHead(403); res.end('forbidden'); });
+    try {
+      await doiClient.ambilSvg(`http://127.0.0.1:${port}/svg?k=SALAH`);
+      assert.fail('seharusnya gagal');
+    } catch (err) {
+      assert.ok(/token DOI ditolak/i.test(err.message), err.message);
+      assert.ok(/doiurl/.test(err.message), 'sebutkan cara memperbaikinya');
+      assert.ok(!err.message.includes('SALAH'), 'token tidak boleh ikut di pesan galat');
+    } finally { srv.close(); }
+  });
+
+  await test('balasan HTML (bukan SVG) ditolak, bukan dikirim sebagai gambar rusak', async () => {
+    const { srv, port } = await serverUji((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<html><body>Login dulu</body></html>');
+    });
+    try {
+      await doiClient.ambilSvg(`http://127.0.0.1:${port}/`);
+      assert.fail('seharusnya gagal');
+    } catch (err) {
+      assert.ok(/bukan SVG/i.test(err.message), err.message);
+    } finally { srv.close(); }
+  });
+
+  await test('URL kosong / tidak sah ditolak dengan pesan yang jelas', async () => {
+    await assert.rejects(() => Promise.resolve().then(() => doiClient.ambilSvg('')), /belum disetel/i);
+    await assert.rejects(() => Promise.resolve().then(() => doiClient.ambilSvg('bukan-url')), /tidak sah/i);
+  });
+
+  /* ---- perender ---- */
+  function browserPalsu(jejak = {}) {
+    return {
+      newPage: async () => {
+        jejak.halaman = (jejak.halaman || 0) + 1;
+        return {
+          setViewport: async (v) => { jejak.viewport = v; },
+          setContent: async (html) => { jejak.html = html; },
+          $: async () => ({ screenshot: async (o) => { jejak.tembakan = o; return Buffer.from('GAMBARPALSU'); } }),
+          screenshot: async () => Buffer.from('HALAMANPENUH'),
+          close: async () => { jejak.ditutup = (jejak.ditutup || 0) + 1; },
+        };
+      },
+    };
+  }
+
+  await test('SVG dirender lewat Chrome milik WhatsApp Web', async () => {
+    const jejak = {};
+    const hasil = await doiImage.svgKeGambar('<svg viewBox="0 0 800 400"></svg>', {
+      urutan: ['chrome'], lebar: 800, ambilBrowser: () => browserPalsu(jejak),
+    });
+    assert.strictEqual(hasil.cara, 'Chrome');
+    assert.strictEqual(hasil.mimetype, 'image/png');
+    assert.ok(hasil.buffer.length > 0);
+    assert.strictEqual(jejak.viewport.width, 800);
+    assert.strictEqual(jejak.viewport.height, 400);
+    assert.ok(jejak.html.includes('<svg'), 'SVG ditanam langsung, bukan lewat <img src>');
+    assert.strictEqual(jejak.ditutup, 1, 'halaman render wajib ditutup kembali');
+  });
+
+  await test('format jpg menghasilkan mimetype JPEG', async () => {
+    const hasil = await doiImage.svgKeGambar('<svg viewBox="0 0 10 10"></svg>', {
+      urutan: ['chrome'], format: 'jpg', ambilBrowser: () => browserPalsu({}),
+    });
+    assert.strictEqual(hasil.mimetype, 'image/jpeg');
+    assert.ok(hasil.nama.endsWith('.jpg'));
+  });
+
+  await test('tanpa perender apa pun: galat menyebutkan jalan keluarnya', async () => {
+    await assert.rejects(
+      () => doiImage.svgKeGambar('<svg></svg>', { urutan: ['chrome'], ambilBrowser: () => null }),
+      (err) => {
+        assert.ok(/tidak ada perender/i.test(err.message), err.message);
+        assert.ok(/Chrome/.test(err.message) && /sharp|ImageMagick/.test(err.message),
+          'sebutkan pilihan yang bisa dipasang');
+        return true;
+      }
+    );
+  });
+
+  /* ---- penjadwal DOI ---- */
+  const SVG_UJI = '<svg viewBox="0 0 400 200"><rect width="400" height="200"/></svg>';
+  function doiSetup(setting = {}, { gagalRender = false, groups = null } = {}) {
+    const store = { doi_url: 'https://contoh.test/wa/svg?k=T', ...setting };
+    const isi = groups || [
+      { id: 1, group_id: 'FWD@g.us', name: 'INSTANT OPS', active: 1 },
+      { id: 2, group_id: 'DOI@g.us', name: 'DOI HARIAN', active: 0 },
+    ];
+    const db = {
+      listWaGroups: () => isi,
+      listActiveWaGroups: () => isi.filter((g) => g.active),
+      updateWaGroup: (id, patch) => Object.assign(isi.find((g) => g.id === id), patch),
+      getSetting: (k, d = null) => (k in store ? store[k] : d),
+      setSetting: (k, v) => { store[k] = String(v); },
+    };
+    const terkirim = [];
+    const wa = {
+      isReady: () => true,
+      browser: () => null,
+      sendImage: async (gid, gambar, opsi = {}) => {
+        terkirim.push({ jenis: 'gambar', gid, bytes: gambar.buffer.length, mimetype: gambar.mimetype, caption: opsi.caption || '', mentions: opsi.mentions || [] });
+      },
+      sendText: async (gid, teks, mentions) => {
+        terkirim.push({ jenis: 'teks', gid, teks, mentions: mentions || [] });
+      },
+    };
+    const notif = [];
+    const sched = new DoiScheduler({
+      db, whatsapp: wa, queue: new Queue({ delayMs: 0 }),
+      config: { doi: { enabled: true }, ocs: { tzOffsetMinutes: 420, tzLabel: 'WIB' } },
+      notifyAdmins: (t) => notif.push(t),
+      pengambil: async () => ({ svg: SVG_UJI, bytes: SVG_UJI.length }),
+      perender: async () => {
+        if (gagalRender) throw new Error('perender palsu gagal');
+        return { buffer: Buffer.from('GAMBAR'), mimetype: 'image/png', cara: 'palsu', nama: 'doi.png' };
+      },
+    });
+    return { sched, terkirim, store, notif, db, isi };
+  }
+
+  await test('group tujuan DOI WAJIB disebut, tidak mewarisi group Forwarder', async () => {
+    const { sched, terkirim } = doiSetup({ doi_enabled: '1' });
+    assert.deepStrictEqual(sched.targetGroups(), []);
+    const hasil = await sched.runOnce();
+    assert.strictEqual(hasil.status, 'failed');
+    assert.ok(/BELUM DISETEL/i.test(hasil.reason), hasil.reason);
+    assert.ok(/doigroup/.test(hasil.reason), 'sebutkan cara menyetelnya');
+    assert.strictEqual(terkirim.length, 0, 'tidak boleh nyasar ke group Forwarder');
+  });
+
+  await test('gambar dikirim lebih dulu, teks menyusul sebagai pesan kedua', async () => {
+    const { sched, terkirim } = doiSetup({ doi_enabled: '1', doi_groups: 'DOI@g.us', doi_pic: JSON.stringify([{ nama: 'Ibu Sandra', nomor: '6285773479551' }]) });
+    const hasil = await sched.runOnce();
+    assert.strictEqual(hasil.status, 'sent', hasil.reason);
+    assert.strictEqual(terkirim.length, 2);
+    assert.strictEqual(terkirim[0].jenis, 'gambar');
+    assert.strictEqual(terkirim[1].jenis, 'teks');
+    assert.strictEqual(terkirim[0].gid, 'DOI@g.us');
+    assert.deepStrictEqual(terkirim[1].mentions, ['6285773479551@c.us'], 'PIC di-mention sungguhan');
+    assert.ok(terkirim[1].teks.includes('@6285773479551'));
+  });
+
+  await test('/doicaption on menggabungkan jadi satu pesan bercaption', async () => {
+    const { sched, terkirim } = doiSetup({ doi_enabled: '1', doi_groups: 'DOI@g.us', doi_caption: '1', doi_pic: JSON.stringify([{ nama: 'Ibu Sandra', nomor: '6285773479551' }]) });
+    await sched.runOnce();
+    assert.strictEqual(terkirim.length, 1);
+    assert.strictEqual(terkirim[0].jenis, 'gambar');
+    assert.ok(terkirim[0].caption.includes('Ibu Sandra'));
+    assert.deepStrictEqual(terkirim[0].mentions, ['6285773479551@c.us']);
+  });
+
+  await test('teks kosong: hanya gambar yang dikirim', async () => {
+    const { sched, terkirim } = doiSetup({ doi_enabled: '1', doi_groups: 'DOI@g.us', doi_text: '   ' });
+    await sched.runOnce();
+    assert.strictEqual(terkirim.length, 1);
+    assert.strictEqual(terkirim[0].jenis, 'gambar');
+  });
+
+  await test('render gagal: tidak ada pesan setengah jadi yang terkirim', async () => {
+    const { sched, terkirim, notif } = doiSetup({ doi_enabled: '1', doi_groups: 'DOI@g.us' }, { gagalRender: true });
+    const hasil = await sched.runOnce();
+    assert.strictEqual(hasil.status, 'failed');
+    assert.strictEqual(terkirim.length, 0, 'jangan mengirim teks tanpa gambarnya');
+    assert.strictEqual(notif.length, 1, 'admin diberi tahu');
+  });
+
+  await test('teks DOI bisa diubah seluruhnya dan placeholder-nya terisi', () => {
+    const { sched } = doiSetup({ doi_pic: JSON.stringify([{ nama: 'Ibu Sandra', nomor: '6285773479551' }, { nama: 'Bpk Maulana', nomor: '' }]) });
+    sched.setOpsi('teks', 'Dear {pic}\n\nData per {tanggal} {jam}. Terima kasih.');
+    const s2 = sched.susunTeks(new Date('2026-09-30T02:15:00Z')); // 09:15 WIB
+    assert.ok(s2.text.startsWith('Dear Ibu Sandra @6285773479551 & Bpk Maulana'));
+    assert.ok(s2.text.includes('30 Sep 2026'), s2.text);
+    assert.ok(/09:15/.test(s2.text), s2.text);
+    assert.deepStrictEqual(s2.mentions, ['6285773479551@c.us'],
+      'PIC tanpa nomor tetap disapa tetapi tidak bisa di-mention');
+  });
+
+  await test('teks DOI bisa dikembalikan ke bawaan', () => {
+    const { sched } = doiSetup({});
+    sched.setOpsi('teks', 'apa saja yang penting panjang');
+    const pesan = sched.setOpsi('teks', 'reset');
+    assert.ok(pesan.includes('bawaan'));
+    assert.strictEqual(sched.opsi().teks, DoiScheduler.TEKS_BAWAAN);
+  });
+
+  await test('PIC DOI terpisah dari PIC jalur lain', () => {
+    const { sched, store } = doiSetup({ stock_pic: JSON.stringify([{ nama: 'Orang Stok', nomor: '628111' }]) });
+    sched.setPicNama('Ibu Sandra, Bpk Andi');
+    sched.setPicNomor('6285773479551, 628976245500');
+    assert.deepStrictEqual(sched.picList().map((p) => p.nama), ['Ibu Sandra', 'Bpk Andi']);
+    assert.ok(store.doi_pic, 'disimpan di kunci sendiri');
+    assert.ok(JSON.parse(store.stock_pic)[0].nama === 'Orang Stok', 'PIC jalur lain tidak tersentuh');
+  });
+
+  await test('nomor PIC DOI divalidasi', () => {
+    const { sched } = doiSetup({});
+    sched.setPicNama('Ibu Sandra');
+    assert.throws(() => sched.setPicNomor('+6285773479551'), /tanda \+/i);
+    assert.throws(() => sched.setPicNomor('0857734795'), /0 di depan/i);
+    assert.throws(() => sched.setPicNomor('628111, 628222'), /nomor tetapi hanya/);
+  });
+
+  await test('jam kirim DOI: hanya jam yang disetel, dan sekali per jam', () => {
+    const { sched, store } = doiSetup({ doi_hours: '8,13' });
+    // 08:05 WIB = 01:05 UTC
+    const tempo = sched.jatuhTempo(new Date('2026-09-30T01:05:00Z'));
+    assert.ok(tempo, 'jam 08 termasuk jam kirim');
+    assert.strictEqual(tempo.jam, 8);
+    assert.strictEqual(sched.jatuhTempo(new Date('2026-09-30T02:05:00Z')), null, 'jam 09 bukan jam kirim');
+    assert.strictEqual(sched.jatuhTempo(new Date('2026-09-30T01:40:00Z')), null, 'lewat dari toleransi menit');
+    store.doi_last_fired = tempo.kunci;
+    assert.strictEqual(sched.jatuhTempo(new Date('2026-09-30T01:06:00Z')), null, 'satu jam hanya sekali');
+  });
+
+  await test('jam kirim DOI bisa dikosongkan dengan sengaja', () => {
+    const { sched } = doiSetup({ doi_hours: '8' });
+    assert.ok(/dikosongkan/i.test(sched.setOpsi('hours', 'hapus')));
+    assert.deepStrictEqual(sched.opsi().hours, []);
+    assert.throws(() => sched.setOpsi('hours', 'pagi'), /jam 0-23/);
+  });
+
+  await test('pengaturan gambar DOI divalidasi', () => {
+    const { sched } = doiSetup({});
+    assert.ok(/PNG/.test(sched.setOpsi('format', 'png')));
+    assert.throws(() => sched.setOpsi('format', 'webp'), /png atau jpg/);
+    assert.ok(/1200/.test(sched.setOpsi('lebar', '1200')));
+    assert.throws(() => sched.setOpsi('lebar', '50'), /200 - 2000/);
+    assert.throws(() => sched.setOpsi('url', 'ftp://x/y'), /http/);
+    assert.ok(sched.setOpsi('url', 'https://x.id/a?k=T').includes('*****'),
+      'konfirmasi penyimpanan URL pun menyamarkan token');
+  });
+
+  await test('tombol MATI: jadwal tidak mengirim, dan alasannya dicatat', async () => {
+    const { sched, terkirim } = doiSetup({ doi_enabled: '0', doi_groups: 'DOI@g.us' });
+    const hasil = await sched.runOnce();
+    assert.strictEqual(hasil.status, 'skipped');
+    assert.strictEqual(terkirim.length, 0);
+    assert.ok(sched.lastSkip && /doion/.test(sched.lastSkip.alasan));
+    // /doi tetap menembus tombol - itu memang mode paksa.
+    const paksa = await sched.runOnce({ paksa: true });
+    assert.strictEqual(paksa.status, 'sent', paksa.reason);
+  });
+
+  await test('/doistatus jujur ketika belum siap dipakai', () => {
+    // Urutan langkah yang disebutkan penting: URL dulu, baru group, baru jam.
+    // Menyebut semuanya sekaligus membuat admin tidak tahu mulai dari mana.
+    const belumUrl = doiSetup({ doi_url: '' }).sched.ringkasanStatus();
+    assert.ok(/doiurl/.test(belumUrl), 'URL yang kosong disebut lebih dulu');
+
+    const belumGroup = doiSetup({}).sched.ringkasanStatus();
+    assert.ok(/BELUM DISETEL/.test(belumGroup));
+    assert.ok(/doigroup/.test(belumGroup), 'lanjut ke group tujuan');
+
+    const belumJam = doiSetup({ doi_groups: 'DOI@g.us' }).sched.ringkasanStatus();
+    assert.ok(/doijam/.test(belumJam), 'terakhir jam kirim');
+
+    // Token tidak boleh muncul di layar status mana pun.
+    const denganToken = doiSetup({ doi_url: 'https://x.id/a?k=RAHASIA', doi_groups: 'DOI@g.us' })
+      .sched.ringkasanStatus();
+    assert.ok(!denganToken.includes('RAHASIA'), denganToken);
+    assert.ok(denganToken.includes('*****'));
+  });
+
+  await test('/doistatus memperingatkan bila group DOI dipakai jalur lain', () => {
+    const { sched } = doiSetup({ doi_groups: 'DOI@g.us', lock_groups: 'DOI@g.us' });
+    const bentrok = sched.groupBentrok();
+    assert.strictEqual(bentrok.length, 1);
+    assert.ok(/Lock Stock/.test(bentrok[0].jalur));
+    assert.ok(/PERHATIAN/.test(sched.ringkasanStatus()));
+  });
+
+  /* ---- pemisahan tujuan ikut mengenal jalur DOI ---- */
+  await test('group DOI ikut disingkirkan dari tujuan Forwarder', () => {
+    const isi = [
+      { id: 1, group_id: 'A@g.us', name: 'INSTANT OPS', active: 1 },
+      { id: 2, group_id: 'C@g.us', name: 'DOI HARIAN', active: 1 },
+    ];
+    const store = { doi_groups: 'C@g.us' };
+    const db = {
+      listWaGroups: () => isi,
+      listActiveWaGroups: () => isi.filter((g) => g.active),
+      updateWaGroup: (id, p) => Object.assign(isi.find((g) => g.id === id), p),
+      getSetting: (k, d = null) => (k in store ? store[k] : d),
+      setSetting: (k, v) => { store[k] = String(v); },
+    };
+    assert.deepStrictEqual(Tujuan.tujuanForwarder(db, {}).map((g) => g.id), ['A@g.us']);
+    const hasil = Tujuan.pisahkanOtomatis(db, {});
+    assert.strictEqual(hasil.dipisah.length, 1);
+    assert.strictEqual(isi[1].active, 0);
+  });
+
+  await test('/tujuan menyebut kedua jalur bertujuan-tetap', () => {
+    const isi = [
+      { id: 1, group_id: 'A@g.us', name: 'INSTANT OPS', active: 1 },
+      { id: 2, group_id: 'B@g.us', name: 'LOCK NCO', active: 0 },
+      { id: 3, group_id: 'C@g.us', name: 'DOI HARIAN', active: 0 },
+    ];
+    const store = { lock_groups: 'B@g.us', doi_groups: 'C@g.us' };
+    const db = {
+      listWaGroups: () => isi,
+      listActiveWaGroups: () => isi.filter((g) => g.active),
+      getSetting: (k, d = null) => (k in store ? store[k] : d),
+    };
+    const teks = Tujuan.ringkasan(db, {});
+    assert.ok(teks.includes('PERINGATAN LOCK STOCK'));
+    assert.ok(teks.includes('MONITORING DOI'));
+    assert.ok(teks.includes('LOCK NCO') && teks.includes('DOI HARIAN'));
+    assert.ok(teks.includes('BEDA'));
+  });
+
+  await test('dua jalur bertujuan-tetap di group yang sama ikut dilaporkan', () => {
+    const isi = [
+      { id: 1, group_id: 'A@g.us', name: 'INSTANT OPS', active: 1 },
+      { id: 2, group_id: 'B@g.us', name: 'GABUNGAN', active: 0 },
+    ];
+    const store = { lock_groups: 'B@g.us', doi_groups: 'B@g.us' };
+    const db = {
+      listWaGroups: () => isi,
+      listActiveWaGroups: () => isi.filter((g) => g.active),
+      getSetting: (k, d = null) => (k in store ? store[k] : d),
+    };
+    const teks = Tujuan.ringkasan(db, {});
+    assert.ok(/dipakai DUA jalur sekaligus/.test(teks), teks);
+    assert.ok(teks.includes('/lockgroup') && teks.includes('/doigroup'));
+  });
+
+  /* ---- pengiriman gambar lewat WhatsAppService sungguhan (stub wwebjs) ---- */
+  // WhatsApp sendiri untuk uji ini: `wa` di atas sudah melewati uji logout /
+  // pemulihan, jadi keadaannya tidak boleh diandaikan masih "ready".
+  const waDoi = new WhatsAppService({
+    clientId: 'doi-uji',
+    sessionPath: path.join(os.tmpdir(), 'wa-doi-session'),
+    healthCheckMs: 0,
+    unlockDelayMs: 10,
+  });
+  await test('WhatsApp untuk uji gambar siap', async () => {
+    global.__WA_STUB__.autoReady = true;
+    global.__WA_STUB__.requireQr = false;
+    global.__WA_STUB__.detached = false;
+    global.__WA_STUB__.failSend = false;
+    await waDoi.start();
+    assert.ok(waDoi.isReady());
+  });
+
+  await test('sendImage mengirim media, bukan teks', async () => {
+    global.__WA_STUB__.sent = [];
+    const hasil = await waDoi.sendImage('120363011111111111@g.us',
+      { buffer: Buffer.from('DUAPULUHBYTEGAMBAR'), mimetype: 'image/png', nama: 'doi.png' },
+      { caption: 'DOI hari ini' });
+    assert.ok(hasil);
+    const dikirim = global.__WA_STUB__.sent;
+    assert.strictEqual(dikirim.length, 1);
+    assert.ok(dikirim[0].media, 'yang dikirim adalah MessageMedia');
+    assert.strictEqual(dikirim[0].media.mimetype, 'image/png');
+    assert.strictEqual(dikirim[0].media.filename, 'doi.png');
+    assert.strictEqual(dikirim[0].caption, 'DOI hari ini');
+  });
+
+  await test('sendImage menolak gambar kosong dan WhatsApp yang belum siap', async () => {
+    await assert.rejects(() => waDoi.sendImage('120363011111111111@g.us', { buffer: Buffer.alloc(0), mimetype: 'image/png' }), /kosong/i);
+    await assert.rejects(() => waDoi.sendImage('', { buffer: Buffer.from('x'), mimetype: 'image/png' }), /belum dipilih/i);
+    await waDoi.stop();
+  });
+
+  await test('jalur DOI tidak pernah menulis apa pun ke web DOI', () => {
+    const kode = fs.readFileSync(path.join(__dirname, '..', 'src', 'doi-client.js'), 'utf8');
+    assert.ok(!/\.(post|put|patch|delete)\s*\(/i.test(kode), 'hanya GET yang boleh ada di doi-client');
+    assert.ok(!/method:\s*['"](POST|PUT|PATCH|DELETE)/i.test(kode));
+  });
+
   /* ------------------------------ hasil --------------------------- */
   console.log('\n==========================================');
   console.log(`  HASIL: ${pass} lulus, ${fail} gagal`);
