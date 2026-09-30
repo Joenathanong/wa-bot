@@ -1051,12 +1051,61 @@ class WhatsAppService extends EventEmitter {
       );
       return msg;
     } catch (err) {
+      // Kirim media gagal? Jalankan PROBE di halaman WhatsApp Web itu sendiri.
+      //
+      // Galat "Data passed to getter must include an id property" datang dari
+      // whatsapp-web.js (Injected/Utils.js) yang memanggil
+      // getOrCreateMediaObject(mediaData.filehash) SEBELUM memeriksa apakah
+      // filehash-nya ada. Pesan aslinya - "media-fault: filehash undefined" -
+      // tidak pernah terbaca karena pemeriksaannya ditaruh 11 baris setelahnya.
+      //
+      // Probe ini menyiapkan PNG 1x1 lewat jalur yang sama, lalu melaporkan
+      // isi objek hasilnya. Kalau filehash memang hilang, daftar kuncinya
+      // memberi tahu apakah medannya berganti nama (mis. fileHash) - itu bisa
+      // ditambal satu baris - atau penyiapannya memang rusak seluruhnya.
+      await this._probeMedia().catch(() => { /* probe tidak boleh menutupi galat asli */ });
       if (isContextLost(err)) {
         logger.error('Pengiriman gambar gagal karena halaman WhatsApp Web terlepas - memulihkan koneksi.');
         this.recover('gagal kirim gambar: halaman terlepas').catch(() => { /* sudah dicatat */ });
         throw new Error('Halaman WhatsApp Web terlepas; koneksi sedang dipulihkan.');
       }
       throw err;
+    }
+  }
+
+  /**
+   * Periksa jalur penyiapan media di dalam halaman WhatsApp Web.
+   * Hanya untuk diagnosa - tidak mengirim apa pun ke siapa pun.
+   */
+  async _probeMedia() {
+    if (!this.client || !this.client.pupPage) return;
+    // PNG 1x1 transparan - sekecil mungkin, supaya yang diuji jalurnya, bukan ukurannya.
+    const PNG_1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    try {
+      const hasil = await this.client.pupPage.evaluate(async (data) => {
+        const out = {};
+        const ambil = (nama) => { try { return window.require(nama); } catch (e) { out[`modul_${nama}`] = 'TIDAK ADA'; return null; } };
+        try {
+          const file = window.WWebJS.mediaInfoToFile({ data, mimetype: 'image/png', filename: 'probe.png' });
+          out.file = { size: file.size, type: file.type };
+          const OpaqueData = ambil('WAWebMediaOpaqueData');
+          const Prep = ambil('WAWebPrepRawMedia');
+          const Storage = ambil('WAWebMediaStorage');
+          out.modulSiap = { OpaqueData: !!OpaqueData, Prep: !!Prep, Storage: !!Storage };
+          if (!OpaqueData || !Prep) return out;
+          const od = await OpaqueData.createFromData(file, 'image/png');
+          const md = await Prep.prepRawMedia(od, {}).waitForPrep();
+          out.mediaDataKeys = md ? Object.keys(md) : null;
+          out.filehash = md ? md.filehash : null;
+          out.type = md ? md.type : null;
+        } catch (e) {
+          out.error = String((e && e.message) || e);
+        }
+        return out;
+      }, PNG_1X1);
+      logger.error('PROBE media: ' + JSON.stringify(hasil).slice(0, 900));
+    } catch (e) {
+      logger.error('PROBE media tidak bisa dijalankan: ' + ((e && e.message) || e));
     }
   }
 
