@@ -1063,7 +1063,7 @@ class WhatsAppService extends EventEmitter {
       // isi objek hasilnya. Kalau filehash memang hilang, daftar kuncinya
       // memberi tahu apakah medannya berganti nama (mis. fileHash) - itu bisa
       // ditambal satu baris - atau penyiapannya memang rusak seluruhnya.
-      await this._probeMedia().catch(() => { /* probe tidak boleh menutupi galat asli */ });
+      await this._probeMedia(chatId).catch(() => { /* probe tidak boleh menutupi galat asli */ });
       if (isContextLost(err)) {
         logger.error('Pengiriman gambar gagal karena halaman WhatsApp Web terlepas - memulihkan koneksi.');
         this.recover('gagal kirim gambar: halaman terlepas').catch(() => { /* sudah dicatat */ });
@@ -1077,33 +1077,47 @@ class WhatsAppService extends EventEmitter {
    * Periksa jalur penyiapan media di dalam halaman WhatsApp Web.
    * Hanya untuk diagnosa - tidak mengirim apa pun ke siapa pun.
    */
-  async _probeMedia() {
+  /**
+   * Telusuri jalur kirim media di dalam halaman WhatsApp Web, LANGKAH DEMI
+   * LANGKAH, dan laporkan langkah mana yang melempar.
+   *
+   * Probe pertama sudah membuktikan penyiapan medianya sehat: filehash terisi.
+   * Jadi kegagalannya ada SESUDAH itu. Daripada menebak, tiap langkah di
+   * processMediaData (whatsapp-web.js Injected/Utils.js 720-800) dijalankan
+   * sendiri-sendiri di sini. Tidak ada yang dikirim ke siapa pun; unggahan ke
+   * server WhatsApp pun sengaja tidak disertakan.
+   *
+   * @param {string} chatId group yang dituju - untuk menguji pengambilan chat-nya juga
+   */
+  async _probeMedia(chatId = null) {
     if (!this.client || !this.client.pupPage) return;
-    // PNG 1x1 transparan - sekecil mungkin, supaya yang diuji jalurnya, bukan ukurannya.
     const PNG_1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
     try {
-      const hasil = await this.client.pupPage.evaluate(async (data) => {
-        const out = {};
-        const ambil = (nama) => { try { return window.require(nama); } catch (e) { out[`modul_${nama}`] = 'TIDAK ADA'; return null; } };
+      const hasil = await this.client.pupPage.evaluate(async (data, chat_id) => {
+        const out = { langkah: [] };
+        const coba = async (nama, fn) => {
+          try { const v = await fn(); out.langkah.push(nama + ': OK'); return v; }
+          catch (e) { out.langkah.push(nama + ': GAGAL - ' + String((e && e.message) || e)); out.gagalDi = nama; throw e; }
+        };
         try {
+          const OpaqueData = window.require('WAWebMediaOpaqueData');
           const file = window.WWebJS.mediaInfoToFile({ data, mimetype: 'image/png', filename: 'probe.png' });
-          out.file = { size: file.size, type: file.type };
-          const OpaqueData = ambil('WAWebMediaOpaqueData');
-          const Prep = ambil('WAWebPrepRawMedia');
-          const Storage = ambil('WAWebMediaStorage');
-          out.modulSiap = { OpaqueData: !!OpaqueData, Prep: !!Prep, Storage: !!Storage };
-          if (!OpaqueData || !Prep) return out;
-          const od = await OpaqueData.createFromData(file, 'image/png');
-          const md = await Prep.prepRawMedia(od, {}).waitForPrep();
-          out.mediaDataKeys = md ? Object.keys(md) : null;
-          out.filehash = md ? md.filehash : null;
-          out.type = md ? md.type : null;
-        } catch (e) {
-          out.error = String((e && e.message) || e);
-        }
+          const od = await coba('createFromData', () => OpaqueData.createFromData(file, 'image/png'));
+          const md = await coba('waitForPrep', () => window.require('WAWebPrepRawMedia').prepRawMedia(od, {}).waitForPrep());
+          out.filehash = md && md.filehash ? 'ADA' : 'KOSONG';
+          const mo = await coba('getOrCreateMediaObject', () => window.require('WAWebMediaStorage').getOrCreateMediaObject(md.filehash));
+          await coba('msgToMediaType', () => window.require('WAWebMmsMediaTypes').msgToMediaType({ type: md.type, isGif: md.isGif, isNewsletter: false }));
+          await coba('consolidate', () => mo.consolidate(md.toJSON()));
+          await coba('castToV4+shouldUseMediaCache', () => window.require('WAWebMediaDataUtils')
+            .shouldUseMediaCache(window.require('WAWebMmsMediaTypes').castToV4(mo.type)));
+          if (chat_id) {
+            const chat = await coba('WWebJS.getChat', () => window.WWebJS.getChat(chat_id, { getAsModel: false }));
+            out.chat = chat ? 'ADA' : 'NULL';
+          }
+        } catch (e) { /* sudah dicatat di out.langkah */ }
         return out;
-      }, PNG_1X1);
-      logger.error('PROBE media: ' + JSON.stringify(hasil).slice(0, 900));
+      }, PNG_1X1, chatId);
+      logger.error('PROBE media: ' + JSON.stringify(hasil).slice(0, 1200));
     } catch (e) {
       logger.error('PROBE media tidak bisa dijalankan: ' + ((e && e.message) || e));
     }
