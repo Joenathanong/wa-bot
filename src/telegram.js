@@ -249,7 +249,7 @@ class TelegramService {
         const doi = [
           '',
           '*5. MONITORING DOI*',
-          '_Gambar DOI ditarik dari web Monitoring DOI, dikirim sebagai_',
+          '_Halaman web Monitoring DOI ditangkap layarnya, dikirim sebagai_',
           '_gambar, lalu disusul teks pendamping berisi mention PIC._',
           '/doi        - ambil & kirim sekarang',
           '/doistatus  - pengaturan, PIC, jadwal berikutnya',
@@ -260,7 +260,10 @@ class TelegramService {
           '/doitext        - ubah teks pendamping (boleh beberapa baris)',
           '/doigroup       - group tujuan (WAJIB, terpisah dari jalur lain)',
           '/doiurl         - URL + token sumber gambar',
-          '/doiformat png|jpg, /doilebar 1080 - bentuk gambar',
+          '/doimode halaman|svg|auto - cara mengambil gambar',
+          '/doilebar 1600, /doitinggi 900, /doiskala 2 - ukuran & ketajaman',
+          '/doiformat jpg|png - format gambar',
+          '/doiselector - penanda "halaman siap" sebelum layar ditangkap',
           '/doicaption on|off - teks jadi caption gambar atau pesan kedua',
         ];
 
@@ -825,6 +828,10 @@ class TelegramService {
       case '/doiurl':
       case '/doiformat':
       case '/doilebar':
+      case '/doitinggi':
+      case '/doiskala':
+      case '/doimode':
+      case '/doiselector':
       case '/doicaption': {
         if (!this.config.isAdmin(userId)) {
           await this.bot.sendMessage(chatId, require('./admin').DENIED);
@@ -1012,11 +1019,21 @@ class TelegramService {
               '🔗 SUMBER GAMBAR DOI',
               '',
               `Sekarang: ${require('./doi-client').samarkanUrl(o.url)}`,
+              `Mode   : ${o.mode === 'halaman'
+                ? `tangkap layar halaman ${o.lebar}x${o.tinggi} @${o.skala}x`
+                : `render SVG ${o.format.toUpperCase()} ${o.lebar}px`}`,
               '',
               'URL ini memuat TOKEN, jadi tokennya selalu disamarkan di sini',
               'maupun di log. Isi dengan URL lengkap:',
               '',
-              '  /doiurl https://doi-monitor.vercel.app/api/public/wa/svg?k=TOKEN',
+              '  /doiurl https://doi-monitor.vercel.app/wa?k=TOKEN',
+              '',
+              'Mode ikut bentuk URL-nya, tidak perlu disetel terpisah:',
+              '  halaman web  -> tangkap layar (disarankan; dirender browser,',
+              '                  jadi font dan tata letaknya persis)',
+              '  /api/.../svg -> endpoint SVG, dirender sendiri',
+              '',
+              'Parameter bare=1 ditambahkan otomatis untuk halaman web.',
               '',
               'Untuk mengosongkan: /doiurl hapus',
             ].join('\n'));
@@ -1030,12 +1047,38 @@ class TelegramService {
           return true;
         }
 
-        if (cmd === '/doijam' || cmd === '/doiformat' || cmd === '/doilebar' || cmd === '/doicaption') {
-          const peta = { '/doijam': 'hours', '/doiformat': 'format', '/doilebar': 'lebar', '/doicaption': 'caption' };
+        if (cmd === '/doijam' || cmd === '/doiformat' || cmd === '/doilebar'
+            || cmd === '/doitinggi' || cmd === '/doiskala' || cmd === '/doimode'
+            || cmd === '/doiselector' || cmd === '/doicaption') {
+          const peta = {
+            '/doijam': 'hours', '/doiformat': 'format', '/doilebar': 'lebar',
+            '/doitinggi': 'tinggi', '/doiskala': 'skala', '/doimode': 'mode',
+            '/doiselector': 'selector', '/doicaption': 'caption',
+          };
+          const oDoi = this.doi.opsi();
           const bantuan = {
             '/doijam': 'Contoh: /doijam 8,13,16  (jam 0-23, dipisah koma)\nKosongkan jadwal: /doijam hapus',
-            '/doiformat': 'Contoh: /doiformat png  atau  /doiformat jpg',
-            '/doilebar': 'Contoh: /doilebar 1080  (200 - 2000 piksel)',
+            '/doiformat': 'Contoh: /doiformat jpg  atau  /doiformat png\n'
+              + 'jpg = berkas lebih kecil (bawaan untuk poster halaman)\n'
+              + 'png = paling tajam untuk tabel dan angka',
+            '/doilebar': `Sekarang: ${oDoi.lebar} px. Contoh: /doilebar 1600  (200 - 2000)\n`
+              + 'Mode halaman: ini LEBAR VIEWPORT, samakan dengan ukuran poster (1600).',
+            '/doitinggi': `Sekarang: ${oDoi.tinggi} px. Contoh: /doitinggi 900  (240 - 4000)\n`
+              + 'Hanya berlaku pada mode tangkap layar halaman.',
+            '/doiskala': `Sekarang: ${oDoi.skala}x -> gambar ${oDoi.lebar * oDoi.skala}x${oDoi.tinggi * oDoi.skala} px.\n`
+              + 'Contoh: /doiskala 2  (1, 2, atau 3)\n'
+              + '1 = berkas paling kecil; 2 = teks tajam saat di-zoom di HP.',
+            '/doimode': `Sekarang: ${oDoi.mode}\n\n`
+              + '/doimode halaman - buka halaman web lalu tangkap layarnya (disarankan;\n'
+              + '                   dirender browser, jadi font & tata letak persis)\n'
+              + '/doimode svg     - ambil endpoint SVG lalu render sendiri\n'
+              + '/doimode auto    - ikuti bentuk URL-nya (bawaan)',
+            '/doiselector': `Sekarang: ${oDoi.selector || '(tidak menunggu)'}\n\n`
+              + 'Penanda yang ditunggu sebelum layar ditangkap - BUKAN timer, supaya\n'
+              + 'poster tidak tertangkap sebelum datanya tampil.\n'
+              + 'Contoh: /doiselector [data-siap="1"]\n'
+              + '/doiselector reset  - kembali ke bawaan\n'
+              + '/doiselector hapus  - jangan menunggu (berisiko poster kosong)',
             '/doicaption': 'Contoh: /doicaption on  (teks jadi caption gambar)\n/doicaption off (teks jadi pesan kedua - disarankan)',
           };
           if (!nilaiDoi) {

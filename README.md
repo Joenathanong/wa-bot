@@ -2374,15 +2374,16 @@ dan tidak ada satu pun petunjuk. Itu kelemahan yang sudah diperbaiki.
 ## 24. Monitoring DOI (jalur 5)
 
 Jalur ini tidak menarik data dari OCS seperti jalur 2-4. Sumbernya adalah
-**web Monitoring DOI**, yang sudah menyediakan tampilan siap-kirim sebagai
-SVG. Bot mengambil gambar itu, mengubahnya menjadi gambar biasa, lalu
-mengirimnya ke WhatsApp beserta teks pendamping.
+**halaman web Monitoring DOI**. Bot membuka halamannya, menangkap layarnya
+menjadi gambar, lalu mengirimnya ke WhatsApp beserta teks pendamping.
 
 ```
-web Monitoring DOI  →  GET .../api/public/wa/svg?k=TOKEN   (hanya membaca)
-        ↓  SVG
-render jadi PNG/JPG  →  sharp / Chrome / ImageMagick (yang pertama tersedia)
+Chrome (milik WhatsApp Web)  →  buka tab BARU
         ↓
+https://doi-monitor.vercel.app/wa?k=TOKEN&bare=1
+        ↓  tunggu penanda [data-siap="1"]  (bukan timer)
+page.screenshot()  →  JPEG 3200×1800
+        ↓  tab ditutup
 Pesan 1 → group tujuan DOI : GAMBAR
         ↓
 Pesan 2 → group tujuan DOI : teks pendamping + REAL mention PIC DOI
@@ -2393,10 +2394,54 @@ kirim** punya setelan sendiri — tidak satu pun diwarisi dari jalur lain, dan
 semuanya bisa diubah dari Telegram tanpa mengedit berkas dan tanpa
 me-restart service.
 
-### 24.1 Menyiapkan sekali
+### 24.1 WhatsApp tidak bisa mengirim SVG
+
+Ini pelajaran yang mahal, jadi dicatat di sini supaya tidak terulang.
+
+Endpoint `…/api/public/wa/svg` mengembalikan `image/svg+xml`. WhatsApp **tidak
+mengenal SVG sebagai gambar** — menyuapkannya langsung ke `MessageMedia`
+membuat WhatsApp Web gagal membangun objek medianya dan melempar:
 
 ```
-/doiurl https://doi-monitor.vercel.app/api/public/wa/svg?k=TOKEN
+Data passed to getter must include an id property
+```
+
+Galat itu **terbaca seperti masalah ID group**, padahal medianya yang salah
+format. Kalau menemuinya lagi, bedakan dulu dengan satu tes sebelum
+memperbaiki yang salah:
+
+> Kirim **pesan teks biasa** ke group yang sama. Teks masuk → ID group benar,
+> masalahnya di media. Teks juga gagal → ID group yang salah, dan mengganti
+> format gambar tidak akan menolong.
+
+Konsekuensinya: apa pun modenya, yang dikirim ke WhatsApp **selalu** gambar
+raster. Konversi bukan pilihan tambahan, melainkan wajib.
+
+### 24.2 Kenapa tangkap layar, bukan render SVG?
+
+Dua-duanya menghasilkan gambar raster, tetapi hasilnya tidak sama.
+
+| | Render SVG (`sharp`/librsvg) | **Tangkap layar halaman** |
+|---|---|---|
+| Yang merender | librsvg | **Browser** |
+| Font | Font mesin. Bila Arial tidak ada, diganti font lain dan **tata letak bergeser** | Font browser — **persis seperti di layar** |
+| Dependensi | `sharp` atau ImageMagick | **Tidak ada** — Chrome-nya sudah dipakai WhatsApp Web |
+| Ukuran hasil | Bergantung atribut SVG | Dipatok viewport, tidak berubah walau tata letak halaman diubah |
+
+Karena itu **mode `halaman` adalah jalur utama**. Mode `svg` tetap ada untuk
+endpoint SVG, tetapi tabel yang hurufnya diganti font lain adalah jenis
+kerusakan yang tidak kelihatan sampai ada yang salah membaca angkanya.
+
+Halaman DOI menyediakan mode khusus **`?bare=1`**: ukurannya pas 1600×900,
+tanpa padding, tanpa baris tombol, tanpa popup — jadi tangkapan viewport
+langsung menjadi gambar jadi. Parameter itu **ditambahkan otomatis** oleh bot
+bila belum ada; tanpa itu yang tertangkap adalah halaman penuh berikut
+tombolnya, dan gambar yang "hampir benar" justru paling mudah lolos.
+
+### 24.3 Menyiapkan sekali
+
+```
+/doiurl https://doi-monitor.vercel.app/wa?k=WA_PAGE_TOKEN
 /doigroup DOI HARIAN            (atau JID / link undangan)
 /doipic Ibu Sandra, Bpk. Andi
 /doiwa 6285773479551, 628976245500
@@ -2404,33 +2449,72 @@ me-restart service.
 /doion
 ```
 
+`/doiurl` sekaligus menentukan modenya — tidak perlu disetel terpisah. URL
+halaman → mode `halaman`; URL `/api/.../svg` → mode `svg`. Paksa dengan
+`/doimode` bila perlu.
+
 Uji lebih dulu tanpa mengirim ke siapa pun:
 
 ```
-npm run doi:test          # ambil SVG, render, simpan ke data/doi-test.png
+npm run doi:test             # tangkap layar, simpan ke data/doi-test.jpg
 npm run doi:test -- --teks   # hanya cetak teks pendamping, tanpa jaringan
 ```
 
+Buka berkasnya dan periksa dua hal: posternya penuh tanpa baris tombol, dan
+**datanya sudah tampil** (bukan keadaan "Loading…").
+
 Sekali jalan manual (menembus tombol on/off dan jam kirim): `/doi`
 
-### 24.2 Perintah lengkap
+### 24.4 Perintah lengkap
 
 | Perintah | Fungsi |
 |---|---|
 | `/doi` | Ambil & kirim sekarang |
-| `/doistatus` | Pengaturan, PIC, perender terakhir, jadwal berikutnya |
+| `/doistatus` | Pengaturan, PIC, cara & ukuran, jadwal berikutnya |
 | `/doion`, `/doioff` | Nyalakan / matikan pengiriman berkala |
 | `/doijam 8,13,16` | Jam kirim (0-23, pisah koma). `/doijam hapus` mengosongkan |
 | `/doipic <Nama>` | PIC DOI, boleh lebih dari satu (pisah koma) |
 | `/doiwa <Nomor>` | Nomor PIC agar di-mention, **urut** sesuai `/doipic` |
 | `/doitext` | Ubah teks pendamping (boleh beberapa baris) |
 | `/doigroup` | Group tujuan — WAJIB, terpisah dari jalur lain |
-| `/doiurl` | URL + token sumber gambar |
-| `/doiformat png\|jpg` | Format gambar |
-| `/doilebar 1080` | Lebar gambar hasil render (200-2000 px) |
+| `/doiurl` | URL + token halaman; sekaligus menentukan mode |
+| `/doimode halaman\|svg\|auto` | Paksa cara pengambilan gambar |
+| `/doilebar 1600` | Lebar viewport |
+| `/doitinggi 900` | Tinggi viewport |
+| `/doiskala 2` | Ketajaman: 1, 2, atau 3 |
+| `/doiformat jpg\|png` | Format gambar |
+| `/doiselector` | Penanda "halaman siap" yang ditunggu |
 | `/doicaption on\|off` | Teks jadi caption gambar, atau pesan kedua |
 
-### 24.3 Teks pendamping
+### 24.5 Tiga hal yang mudah terlewat — dan dijaga di kode
+
+Ketiganya ada di `src/doi-page.js`, dengan uji otomatis yang menjaganya:
+
+1. **Halaman baru, bukan halaman WhatsApp Web.** Menavigasi halaman WhatsApp
+   akan memutus sesinya. Bot memakai `client.pupBrowser.newPage()`, dan uji
+   otomatis menolak bila `pupPage` sampai muncul di berkas itu.
+2. **`page.close()` di dalam `finally`.** Tanpa itu satu tab menumpuk setiap
+   kali laporan dikirim; beberapa minggu kemudian browsernya mati kehabisan
+   memori dan WhatsApp ikut putus. Ada uji khusus yang memastikan tab tetap
+   ditutup **walau pengambilannya gagal**.
+3. **Menunggu penanda, bukan timer.** Halaman memasang `[data-siap="1"]`
+   setelah datanya tampil. Bila penanda itu tidak muncul dalam batas waktu,
+   bot **GAGAL** dan tidak menangkap apa pun. Itu disengaja: poster
+   "Loading…" yang terkirim ke group operasional terlihat sah dan tidak ada
+   yang memeriksanya — jauh lebih berbahaya daripada laporan yang tidak
+   datang dan langsung kelihatan. Bila penandanya memang sudah tidak ada,
+   matikan penungguannya dari Telegram: `/doiselector hapus`.
+
+### 24.6 Ukuran & ketajaman
+
+Bawaan: viewport 1600×900 dengan `deviceScaleFactor: 2` → gambar
+**3200×1800**, JPEG kualitas 92, sekitar 670 KB. Teks tetap tajam saat
+di-zoom di HP.
+
+Ingin berkas lebih kecil: `/doiskala 1` → tepat 1600×900.
+Ingin tabel sangat tajam: `/doiformat png` (berkasnya jauh lebih besar).
+
+### 24.7 Teks pendamping
 
 `/doitext` tanpa argumen menampilkan teks sekarang beserta pratinjaunya, lalu
 menunggu teks baru sebagai pesan biasa — jadi boleh beberapa baris, dengan
@@ -2449,58 +2533,40 @@ menjadi mention. Itu disengaja: nama yang salah tulis lebih baik terlihat di
 pesan daripada hilang tanpa jejak. `/doistatus` menandainya dengan
 `[tanpa nomor]`.
 
-### 24.4 Kenapa teks jadi pesan kedua, bukan caption?
+Teks dikirim sebagai **pesan kedua**, bukan caption. Caption gambar bisa
+memuat mention, tetapi pada banyak versi WhatsApp Web caption panjang
+terpotong dan mention di dalamnya tidak selalu berubah menjadi notifikasi.
+Yang tetap ingin satu pesan: `/doicaption on`.
 
-Caption gambar di WhatsApp bisa memuat mention, tetapi pada banyak versi
-WhatsApp Web caption panjang terpotong dan mention di dalamnya tidak selalu
-berubah menjadi notifikasi. Dua pesan terpisah membuat gambarnya utuh dan
-mention PIC pasti bekerja. Yang tetap ingin satu pesan: `/doicaption on`.
+### 24.8 Keamanan token
 
-### 24.5 Perender gambar — tidak perlu memasang ImageMagick
+URL halaman memuat token (`WA_PAGE_TOKEN`), jadi diperlakukan seperti
+kredensial:
 
-Petunjuk aslinya memakai `convert doi.svg doi.jpg` (ImageMagick). Itu bekerja
-di meja kerja, tetapi menjadikan pengiriman laporan bergantung pada satu
-program yang harus dipasang terpisah di PC produksi — dan di Windows yang baru
-diinstal, ImageMagick nyaris pasti belum ada.
-
-Aplikasi ini **sudah** membawa Chrome (dipakai WhatsApp Web), jadi perender SVG
-kelas satu sudah ada di mesin yang sama. Urutan yang dicoba:
-
-| Urutan | Perender | Catatan |
-|---|---|---|
-| 1 | `sharp` | Dipakai bila kebetulan terpasang; paling cepat |
-| 2 | **Chrome** | Browser yang sama dengan WhatsApp Web. **Tanpa pemasangan apa pun** — ini jalur utama di produksi |
-| 3 | ImageMagick | `magick` / `convert`, bila memang ada di PATH |
-
-Yang pertama berhasil dipakai, dan namanya dicatat: `/doistatus` menyebut
-`Perender terakhir`. Kalau hasil gambarnya aneh, itu petunjuk pertama.
-
-Halaman render dibuka sebagai **tab baru** di browser yang sama lalu ditutup
-lagi. Halaman WhatsApp Web tidak disentuh — membaginya akan merusak sesi.
-
-### 24.6 Keamanan token
-
-URL sumber memuat token, jadi diperlakukan seperti kredensial:
-
-- Disimpan di `.env` (`DOI_SVG_URL`) atau di database lewat `/doiurl`, **tidak
+- Disimpan di `.env` (`DOI_URL`) atau di database lewat `/doiurl`, **tidak
   pernah di dalam kode**.
 - Setiap kali ditampilkan — `/doistatus`, `/doiurl`, log, pesan galat —
   tokennya disamarkan menjadi `k=*****`.
 - Token yang ditolak server (HTTP 401/403) dilaporkan sebagai
   "token DOI ditolak", **tanpa** menyertakan tokennya.
-- Berkas `src/doi-client.js` hanya berisi GET. Tidak ada satu pun jalur yang
-  bisa mengubah apa pun di sisi web DOI, dan ada uji otomatis yang menjaga itu.
 
-### 24.7 Troubleshooting
+> ⚠️ **Token yang pernah tertulis di chat harus dianggap bocor.** Ganti
+> `WA_PAGE_TOKEN` di sisi web, lalu perbarui di bot dengan `/doiurl`.
+> Tidak perlu restart.
+
+### 24.9 Troubleshooting
 
 | Gejala | Sebab & tindakan |
 |---|---|
+| `Data passed to getter must include an id property` | Media salah format (SVG mentah), **bukan** ID group. Lihat 24.1 — kirim teks biasa dulu untuk memastikan |
 | `group tujuan DOI BELUM DISETEL` | Sengaja: jalur ini tidak mewarisi group jalur lain. `/doigroup <nama atau JID>` |
-| `token DOI ditolak (HTTP 403)` | Token kedaluwarsa atau salah. Ambil URL baru dari web DOI lalu `/doiurl` |
-| `balasan bukan SVG` | URL-nya halaman web, bukan endpoint SVG. Pastikan diakhiri `/api/public/wa/svg?k=…` |
-| `tidak ada perender SVG yang bisa dipakai` | WhatsApp belum tersambung (Chrome belum hidup). Tunggu status `ready`, atau `npm install sharp` |
+| `penanda siap "[data-siap="1"]" tidak muncul` | Halaman gagal memuat data, atau penandanya berubah. Buka URL-nya di peramban. Bila penandanya memang hilang: `/doiselector hapus` |
+| `Chrome belum tersedia` | Mode halaman memakai browser WhatsApp Web. Tunggu status WhatsApp `ready` lalu `/doi` lagi |
+| `token DOI ditolak (HTTP 401/403)` | Token kedaluwarsa atau salah. Ambil `WA_PAGE_TOKEN` baru lalu `/doiurl` |
+| Poster tertangkap berikut baris tombol | `bare=1` hilang dari URL. `/doiurl` lagi — parameternya ditambahkan otomatis |
 | Gambar terkirim, teks tidak | Teks kosong. `/doitext` lalu isi |
-| Tulisan di gambar berbayang | `/doiformat png` (JPG memang berbayang untuk tabel dan angka) |
-| Gambar terlalu kecil di HP | `/doilebar 1440` |
+| Berkas terlalu besar | `/doiskala 1` (tepat 1600×900) |
+| Gambar terlalu kecil di HP | `/doiskala 2`, atau naikkan `/doilebar` |
 | `/doi` berhasil tetapi jadwal diam | Tombolnya MATI atau jam belum disetel. `/doistatus` menjelaskannya, lalu `/doion` / `/doijam` |
 | Peringatan "group ini juga tujuan …" | Dua jalur menumpuk di satu group. Lihat `/tujuan` lalu pindahkan salah satunya |
+| Browser lama-lama berat / WhatsApp putus | Tab render tidak tertutup. Sudah dijaga `finally` + uji otomatis; bila terjadi, laporkan — itu regresi |

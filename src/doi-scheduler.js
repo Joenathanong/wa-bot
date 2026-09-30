@@ -3,6 +3,7 @@
 const logger = require('./logger').scope('DOI');
 const { ambilSvg, samarkanUrl } = require('./doi-client');
 const { svgKeGambar } = require('./doi-image');
+const { tangkapHalaman, pastikanBare, tampakHalaman, SELECTOR_BAWAAN } = require('./doi-page');
 const { normalisasiPic } = require('./lock-report');
 const { kunciHari, jamLokal, tanggalLokal } = require('./stock-report');
 const { validateWhatsappNumber, buildMentions } = require('./render');
@@ -13,8 +14,8 @@ const tujuan = require('./tujuan');
  *
  * Alurnya sederhana dan sengaja dibuat begitu:
  *
- *   1. tarik SVG dari web Monitoring DOI (URL + token di setelan)
- *   2. render SVG menjadi gambar (PNG/JPEG)
+ *   1. buka halaman web Monitoring DOI (URL + token di setelan)
+ *   2. tangkap layarnya menjadi gambar (JPEG/PNG)
  *   3. kirim GAMBAR ke group tujuan
  *   4. kirim TEKS sebagai pesan kedua, lengkap dengan mention PIC
  *
@@ -40,7 +41,11 @@ const KUNCI = {
   teks: 'doi_text',
   url: 'doi_url',
   format: 'doi_format',
+  mode: 'doi_mode',
   lebar: 'doi_width',
+  tinggi: 'doi_height',
+  skala: 'doi_scale',
+  selector: 'doi_selector',
   caption: 'doi_caption',
   lastFired: 'doi_last_fired',
 };
@@ -57,7 +62,10 @@ const TEKS_BAWAAN = [
 ].join('\n');
 
 class DoiScheduler {
-  constructor({ db, whatsapp, queue, config, notifyAdmins = null, pengambil = null, perender = null }) {
+  constructor({
+    db, whatsapp, queue, config, notifyAdmins = null,
+    pengambil = null, perender = null, penangkap = null,
+  }) {
     this.db = db;
     this.wa = whatsapp;
     this.queue = queue;
@@ -68,6 +76,7 @@ class DoiScheduler {
     // Bisa diganti saat pengujian supaya tidak menyentuh jaringan / Chrome.
     this.pengambil = pengambil || ambilSvg;
     this.perender = perender || svgKeGambar;
+    this.penangkap = penangkap || tangkapHalaman;
 
     this.timer = null;
     this.running = false;
@@ -108,16 +117,37 @@ class DoiScheduler {
   opsi() {
     const d = this.dasar;
     const c = (this.config && this.config.ocs) || {};
-    const format = String(this._setting(KUNCI.format, d.format || 'png')).toLowerCase();
+    const url = String(this._setting(KUNCI.url, d.url || ''));
+    const modeTersimpan = String(this._setting(KUNCI.mode, d.mode || '')).toLowerCase();
+    // Mode tidak perlu disetel manual: URL sudah mengatakannya. Endpoint
+    // /api/.../svg berarti SVG, apa pun selainnya adalah halaman web.
+    // Setelan eksplisit tetap menang, untuk kasus yang tidak terduga.
+    const mode = ['halaman', 'svg'].includes(modeTersimpan)
+      ? modeTersimpan
+      : (tampakHalaman(url) || !url ? 'halaman' : 'svg');
+    // Mode halaman = poster jadi, JPEG 92 seperti yang diuji di sisi web.
+    // Mode SVG = tabel hasil render, PNG supaya angkanya tidak berbayang.
+    const formatBawaan = d.format || (mode === 'halaman' ? 'jpg' : 'png');
+    const format = String(this._setting(KUNCI.format, formatBawaan)).toLowerCase();
+    const lebarBawaan = d.lebar || (mode === 'halaman' ? 1600 : 1080);
     return {
       hours: DoiScheduler.parseJam(this._setting(KUNCI.hours, (d.hours || []).join(','))),
       groupIds: DoiScheduler.parseDaftar(this._setting(KUNCI.groups, (d.groupIds || []).join(','))),
-      url: String(this._setting(KUNCI.url, d.url || '')),
-      format: ['png', 'jpg', 'jpeg'].includes(format) ? format : 'png',
-      lebar: Math.max(200, parseInt(this._setting(KUNCI.lebar, d.lebar || 1080), 10) || 1080),
+      url: mode === 'halaman' ? pastikanBare(url) : url,
+      urlMentah: url,
+      mode,
+      format: ['png', 'jpg', 'jpeg'].includes(format) ? format : formatBawaan,
+      lebar: Math.max(200, parseInt(this._setting(KUNCI.lebar, lebarBawaan), 10) || lebarBawaan),
+      tinggi: Math.max(240, parseInt(this._setting(KUNCI.tinggi, d.tinggi || 900), 10) || 900),
+      skala: Math.min(3, Math.max(1, parseInt(this._setting(KUNCI.skala, d.skala || 2), 10) || 2)),
+      selector: (() => {
+        const v = this.db ? this.db.getSetting(KUNCI.selector, null) : null;
+        if (v === null || v === undefined) return d.selector === undefined ? SELECTOR_BAWAAN : d.selector;
+        return String(v);   // string kosong = sengaja tidak menunggu penanda
+      })(),
       caption: String(this._setting(KUNCI.caption, d.caption ? '1' : '0')) === '1',
       teks: String(this._setting(KUNCI.teks, d.teks || TEKS_BAWAAN)),
-      timeoutMs: d.timeoutMs || 20000,
+      timeoutMs: d.timeoutMs || 60000,
       tzOffsetMinutes: c.tzOffsetMinutes || 420,
       tzLabel: c.tzLabel || 'WIB',
     };
@@ -168,8 +198,66 @@ class DoiScheduler {
         throw new Error('URL tidak sah. Tempelkan URL lengkap termasuk https://');
       }
       if (!/^https?:$/.test(u.protocol)) throw new Error('URL harus http atau https');
+      // Mode ikut URL-nya, tidak perlu disetel terpisah: satu perintah, satu
+      // keputusan. Setelan mode lama dibersihkan supaya tidak diam-diam
+      // bertengkar dengan URL yang baru.
       this.db.setSetting(KUNCI.url, teks);
-      return `URL DOI: ${samarkanUrl(teks)}`;
+      this.db.setSetting(KUNCI.mode, '');
+      const o = this.opsi();
+      if (o.mode === 'halaman') {
+        const bare = pastikanBare(teks) !== teks
+          ? '\n\nParameter "bare=1" ditambahkan otomatis - tanpa itu yang tertangkap '
+            + 'adalah halaman penuh berikut tombol dan padding-nya.'
+          : '';
+        return `URL DOI: ${samarkanUrl(o.url)}\nMode: TANGKAP LAYAR HALAMAN `
+          + `(${o.lebar}x${o.tinggi} @${o.skala}x, ${o.format.toUpperCase()})${bare}`;
+      }
+      return `URL DOI: ${samarkanUrl(o.url)}\nMode: RENDER SVG (${o.format.toUpperCase()} ${o.lebar}px)`;
+    }
+
+    if (nama === 'mode') {
+      const m = String(nilai).trim().toLowerCase();
+      if (/^(auto|otomatis|hapus|kosong)$/i.test(m)) {
+        this.db.setSetting(KUNCI.mode, '');
+        return `Mode mengikuti URL lagi. Sekarang: ${this.opsi().mode}`;
+      }
+      if (!['halaman', 'svg'].includes(m)) throw new Error('pilih: halaman, svg, atau auto');
+      this.db.setSetting(KUNCI.mode, m);
+      return m === 'halaman'
+        ? 'Mode: TANGKAP LAYAR HALAMAN - dirender browser, jadi font dan tata letaknya '
+          + 'persis seperti yang terlihat di layar.'
+        : 'Mode: RENDER SVG - endpoint SVG diambil lalu dirender sendiri.';
+    }
+
+    if (nama === 'tinggi') {
+      const n = parseInt(String(nilai).replace(/[^\d]/g, ''), 10);
+      if (!Number.isFinite(n) || n < 240 || n > 4000) throw new Error('isi tinggi 240 - 4000 piksel');
+      this.db.setSetting(KUNCI.tinggi, String(n));
+      return `Tinggi halaman: ${n} piksel`;
+    }
+
+    if (nama === 'skala') {
+      const n = parseInt(String(nilai).replace(/[^\d]/g, ''), 10);
+      if (!Number.isFinite(n) || n < 1 || n > 3) throw new Error('isi 1, 2, atau 3');
+      this.db.setSetting(KUNCI.skala, String(n));
+      const o = this.opsi();
+      return `Ketajaman: ${n}x (gambar jadi ${o.lebar * n}x${o.tinggi * n} piksel)`
+        + (n === 1 ? ' - berkas paling kecil' : n >= 3 ? ' - berkas paling besar' : ' - teks tajam saat di-zoom di HP');
+    }
+
+    if (nama === 'selector') {
+      const teks = String(nilai || '').trim();
+      if (/^(hapus|kosong|mati|off)$/i.test(teks)) {
+        this.db.setSetting(KUNCI.selector, '');
+        return 'Penungguan penanda siap DIMATIKAN. Layar ditangkap segera setelah '
+          + 'jaringan halaman tenang - ada risiko poster tertangkap sebelum datanya tampil.';
+      }
+      if (/^(reset|bawaan|default)$/i.test(teks)) {
+        this.db.setSetting(KUNCI.selector, SELECTOR_BAWAAN);
+        return `Penanda siap kembali ke bawaan: ${SELECTOR_BAWAAN}`;
+      }
+      this.db.setSetting(KUNCI.selector, teks);
+      return `Penanda siap: ${teks}`;
     }
 
     if (nama === 'format') {
@@ -409,20 +497,52 @@ class DoiScheduler {
     }
   }
 
-  /** Tarik SVG lalu render menjadi gambar siap kirim. */
+  /** Browser Chrome milik WhatsApp Web - dipakai kedua mode. */
+  _ambilBrowser() {
+    return (this.wa && typeof this.wa.browser === 'function') ? this.wa.browser() : null;
+  }
+
+  /**
+   * Ambil gambar DOI siap kirim.
+   *
+   * MODE UTAMA "halaman": buka halaman web ?bare=1 lalu tangkap layarnya.
+   * Yang merender adalah browser, dengan font browser, jadi hasilnya persis
+   * seperti yang terlihat di layar - tidak ada risiko font pengganti yang
+   * menggeser tata letak tabel.
+   *
+   * MODE "svg" tetap ada untuk endpoint /api/.../svg. Perlu diingat: apa pun
+   * modenya, yang dikirim ke WhatsApp SELALU gambar raster. WhatsApp tidak
+   * bisa mengirim SVG sama sekali - galatnya bahkan menyesatkan
+   * ("Data passed to getter must include an id property"), terbaca seperti
+   * masalah ID group padahal medianya yang salah format.
+   */
   async ambilGambar() {
     const o = this.opsi();
     if (!o.url) {
       throw new Error('URL DOI belum disetel. Setel dengan /doiurl <url lengkap berikut token>');
     }
-    const { svg } = await this.pengambil(o.url, { timeoutMs: o.timeoutMs });
-    const gambar = await this.perender(svg, {
-      format: o.format,
-      lebar: o.lebar,
-      // Chrome-nya milik WhatsApp Web; halaman baru dibuka dan ditutup sendiri
-      // oleh perender, halaman WhatsApp tidak disentuh.
-      ambilBrowser: () => (this.wa && typeof this.wa.browser === 'function' ? this.wa.browser() : null),
-    });
+
+    let gambar;
+    if (o.mode === 'halaman') {
+      gambar = await this.penangkap(o.url, {
+        ambilBrowser: () => this._ambilBrowser(),
+        lebar: o.lebar,
+        tinggi: o.tinggi,
+        skala: o.skala,
+        format: o.format,
+        selector: o.selector,
+        timeoutMs: o.timeoutMs,
+      });
+    } else {
+      const { svg } = await this.pengambil(o.url, { timeoutMs: o.timeoutMs });
+      gambar = await this.perender(svg, {
+        format: o.format,
+        lebar: o.lebar,
+        // Chrome-nya milik WhatsApp Web; halaman baru dibuka dan ditutup
+        // sendiri oleh perender, halaman WhatsApp tidak disentuh.
+        ambilBrowser: () => this._ambilBrowser(),
+      });
+    }
     this.lastCara = gambar.cara;
     this.lastBytes = gambar.buffer.length;
     return gambar;
@@ -537,7 +657,13 @@ class DoiScheduler {
       ? `Jam kirim: ${this._jamTeks(o.hours)} ${o.tzLabel}`
       : 'Jam kirim: belum disetel');
     B.push(`Sumber gambar: ${samarkanUrl(o.url)}`);
-    B.push(`Format gambar: ${o.format.toUpperCase()} ${o.lebar}px`);
+    B.push(o.mode === 'halaman'
+      ? `Cara: tangkap layar halaman ${o.lebar}x${o.tinggi} @${o.skala}x `
+        + `= ${o.lebar * o.skala}x${o.tinggi * o.skala} ${o.format.toUpperCase()}`
+      : `Cara: render SVG jadi ${o.format.toUpperCase()} ${o.lebar}px`);
+    if (o.mode === 'halaman') {
+      B.push(`Penanda siap: ${o.selector || '(tidak ditunggu - berisiko poster kosong)'}`);
+    }
     B.push(`Teks: ${o.caption ? 'jadi caption gambar (1 pesan)' : 'pesan kedua setelah gambar'}`);
     const pic = this.picList();
     B.push(`PIC: ${pic.length === 0 ? '(belum diisi - pesan tanpa sapaan)'

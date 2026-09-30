@@ -18,6 +18,7 @@ const Database = require(path.join(__dirname, '..', 'src', 'database'));
 const DoiScheduler = require(path.join(__dirname, '..', 'src', 'doi-scheduler'));
 const { ambilSvg, samarkanUrl } = require(path.join(__dirname, '..', 'src', 'doi-client'));
 const { svgKeGambar, ekstensi } = require(path.join(__dirname, '..', 'src', 'doi-image'));
+const { tangkapHalaman } = require(path.join(__dirname, '..', 'src', 'doi-page'));
 const { findLocalBrowser } = require(path.join(__dirname, '..', 'src', 'whatsapp'));
 
 const argv = process.argv.slice(2);
@@ -70,6 +71,10 @@ async function main() {
 
   garis('UJI MONITORING DOI');
   console.log(`URL          : ${samarkanUrl(urlArg || o.url)}`);
+  console.log(`Cara         : ${o.mode === 'halaman'
+    ? `tangkap layar halaman ${o.lebar}x${o.tinggi} @${o.skala}x`
+    : `render SVG ${o.lebar}px`}`);
+  if (o.mode === 'halaman') console.log(`Penanda siap : ${o.selector || '(tidak ditunggu)'}`);
   console.log(`Jam kirim    : ${o.hours.length ? o.hours.map((j) => `${String(j).padStart(2, '0')}:00`).join(', ') : '(belum disetel)'} ${o.tzLabel}`);
   console.log(`Format       : ${o.format.toUpperCase()} ${o.lebar}px`);
   console.log(`Teks jadi    : ${o.caption ? 'caption gambar' : 'pesan kedua'}`);
@@ -90,29 +95,45 @@ async function main() {
   const alamat = urlArg || o.url;
   if (!alamat) {
     console.log('\nURL belum disetel. Setel dulu: /doiurl <url> di Telegram, '
-      + 'atau DOI_SVG_URL di .env, atau jalankan: npm run doi:test -- --url <url>');
+      + 'atau DOI_URL di .env, atau jalankan: npm run doi:test -- --url <url>');
     db.close();
     return;
   }
 
-  garis('AMBIL SVG');
-  const { svg, bytes } = await ambilSvg(alamat, { timeoutMs: o.timeoutMs });
-  console.log(`SVG terambil : ${Math.round(bytes / 1024)} KB`);
-
-  garis('RENDER GAMBAR');
+  garis(o.mode === 'halaman' ? 'TANGKAP LAYAR HALAMAN' : 'AMBIL SVG & RENDER');
   const browser = await browserSendiri();
   try {
-    const gambar = await svgKeGambar(svg, {
-      format: o.format,
-      lebar: o.lebar,
-      ambilBrowser: () => browser,
-    });
+    let gambar;
+    if (o.mode === 'halaman') {
+      if (!browser) throw new Error('Chrome tidak bisa dijalankan - mode halaman butuh browser. '
+        + 'Isi CHROME_PATH di .env, atau uji mode SVG.');
+      gambar = await tangkapHalaman(alamat, {
+        ambilBrowser: () => browser,
+        lebar: o.lebar,
+        tinggi: o.tinggi,
+        skala: o.skala,
+        format: o.format,
+        selector: o.selector,
+        timeoutMs: o.timeoutMs,
+      });
+    } else {
+      const { svg, bytes } = await ambilSvg(alamat, { timeoutMs: o.timeoutMs });
+      console.log(`SVG terambil : ${Math.round(bytes / 1024)} KB`);
+      gambar = await svgKeGambar(svg, {
+        format: o.format,
+        lebar: o.lebar,
+        ambilBrowser: () => browser,
+      });
+    }
     const tujuan = path.join(path.dirname(config.db.path), `doi-test.${ekstensi(o.format)}`);
     fs.writeFileSync(tujuan, gambar.buffer);
     console.log(`Perender     : ${gambar.cara}`);
     console.log(`Ukuran       : ${Math.round(gambar.buffer.length / 1024)} KB`);
     console.log(`Disimpan ke  : ${tujuan}`);
     console.log('\nBuka berkas itu untuk memastikan gambarnya utuh sebelum dikirim ke group.');
+    if (o.mode === 'halaman') {
+      console.log('Periksa: apakah posternya penuh tanpa baris tombol, dan datanya sudah tampil?');
+    }
   } finally {
     if (browser) { try { await browser.close(); } catch (e) { /* diabaikan */ } }
     db.close();

@@ -248,13 +248,25 @@ const config = {
   // ditampilkan mentah di Telegram maupun log (lihat doi-client.samarkanUrl).
   doi: {
     enabled: /^(1|true|ya|on)$/i.test(String(process.env.DOI_ENABLED || '').trim()),
-    url: (process.env.DOI_SVG_URL || '').trim(),
-    hours: parseJamList(process.env.DOI_HOURS, ""),
+    // DOI_URL = halaman web (disarankan). DOI_SVG_URL masih dibaca supaya
+    // pemasangan lama tidak mendadak kehilangan sumbernya saat diperbarui.
+    url: (process.env.DOI_URL || process.env.DOI_SVG_URL || '').trim(),
+    // Kosong = mode ditentukan dari bentuk URL-nya. Lihat doi-scheduler.opsi().
+    mode: (process.env.DOI_MODE || '').trim().toLowerCase(),
+    hours: parseJamList(process.env.DOI_HOURS, ''),
     groupIds: parseIdList(process.env.DOI_GROUP_IDS),
-    format: (process.env.DOI_IMAGE_FORMAT || 'png').trim().toLowerCase(),
-    lebar: toInt(process.env.DOI_IMAGE_WIDTH, 1080),
+    // Kosong = ikut mode: halaman -> jpg 1600x900, svg -> png 1080.
+    format: (process.env.DOI_IMAGE_FORMAT || '').trim().toLowerCase() || null,
+    lebar: toInt(process.env.DOI_IMAGE_WIDTH, 0) || null,
+    tinggi: toInt(process.env.DOI_IMAGE_HEIGHT, 900),
+    skala: toInt(process.env.DOI_IMAGE_SCALE, 2),
+    // Penanda "halaman siap" yang ditunggu sebelum layar ditangkap.
+    // DOI_WAIT_SELECTOR="" (sengaja kosong) = tidak menunggu.
+    selector: process.env.DOI_WAIT_SELECTOR === undefined
+      ? undefined
+      : String(process.env.DOI_WAIT_SELECTOR),
     caption: /^(1|true|ya|on)$/i.test(String(process.env.DOI_CAPTION || '').trim()),
-    timeoutMs: toInt(process.env.DOI_TIMEOUT_MS, 20000),
+    timeoutMs: toInt(process.env.DOI_TIMEOUT_MS, 60000),
     teks: process.env.DOI_TEXT || '',
   },
 

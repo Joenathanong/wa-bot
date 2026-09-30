@@ -4459,7 +4459,8 @@ async function run() {
   /* ---- penjadwal DOI ---- */
   const SVG_UJI = '<svg viewBox="0 0 400 200"><rect width="400" height="200"/></svg>';
   function doiSetup(setting = {}, { gagalRender = false, groups = null } = {}) {
-    const store = { doi_url: 'https://contoh.test/wa/svg?k=T', ...setting };
+    // URL endpoint SVG: uji lama ini memang menguji jalur render SVG.
+    const store = { doi_url: 'https://contoh.test/api/public/wa/svg?k=T', ...setting };
     const isi = groups || [
       { id: 1, group_id: 'FWD@g.us', name: 'INSTANT OPS', active: 1 },
       { id: 2, group_id: 'DOI@g.us', name: 'DOI HARIAN', active: 0 },
@@ -4645,6 +4646,192 @@ async function run() {
     assert.strictEqual(bentrok.length, 1);
     assert.ok(/Lock Stock/.test(bentrok[0].jalur));
     assert.ok(/PERHATIAN/.test(sched.ringkasanStatus()));
+  });
+
+  /* ---- mode UTAMA: tangkap layar halaman web ---- */
+  const doiPage = require('../src/doi-page');
+
+  await test('bare=1 ditambahkan otomatis pada URL halaman', () => {
+    assert.strictEqual(
+      doiPage.pastikanBare('https://doi-monitor.vercel.app/wa?k=T'),
+      'https://doi-monitor.vercel.app/wa?k=T&bare=1'
+    );
+    assert.strictEqual(
+      doiPage.pastikanBare('https://doi-monitor.vercel.app/wa?k=T&bare=1'),
+      'https://doi-monitor.vercel.app/wa?k=T&bare=1',
+      'tidak digandakan'
+    );
+    assert.strictEqual(
+      doiPage.pastikanBare('https://x.id/api/public/wa/svg?k=T'),
+      'https://x.id/api/public/wa/svg?k=T',
+      'endpoint API bukan halaman - jangan disentuh'
+    );
+  });
+
+  await test('mode ditentukan dari bentuk URL, tanpa disetel manual', () => {
+    const halaman = doiSetup({ doi_url: 'https://doi-monitor.vercel.app/wa?k=T' }).sched.opsi();
+    assert.strictEqual(halaman.mode, 'halaman');
+    assert.strictEqual(halaman.format, 'jpg', 'poster halaman: JPEG seperti yang diuji di sisi web');
+    assert.strictEqual(halaman.lebar, 1600);
+    assert.strictEqual(halaman.tinggi, 900);
+    assert.strictEqual(halaman.skala, 2);
+    assert.ok(halaman.url.endsWith('bare=1'));
+
+    const svg = doiSetup({ doi_url: 'https://x.id/api/public/wa/svg?k=T' }).sched.opsi();
+    assert.strictEqual(svg.mode, 'svg');
+    assert.strictEqual(svg.format, 'png', 'tabel hasil render: PNG supaya angka tidak berbayang');
+
+    const paksa = doiSetup({ doi_url: 'https://x.id/api/public/wa/svg?k=T', doi_mode: 'halaman' }).sched.opsi();
+    assert.strictEqual(paksa.mode, 'halaman', 'setelan eksplisit menang');
+  });
+
+  /** Browser palsu yang mencatat SEMUA disiplin yang mudah terlewat. */
+  function browserHalaman(jejak = {}, { penandaAda = true } = {}) {
+    jejak.dibuka = 0; jejak.ditutup = 0;
+    return {
+      newPage: async () => {
+        jejak.dibuka += 1;
+        return {
+          setViewport: async (v) => { jejak.viewport = v; },
+          goto: async (url, o) => { jejak.url = url; jejak.goto = o; },
+          waitForSelector: async (sel) => {
+            jejak.selector = sel;
+            if (!penandaAda) throw new Error('stub: penanda tidak muncul');
+          },
+          screenshot: async (o) => { jejak.tembakan = o; return Buffer.alloc(680 * 1024); },
+          close: async () => { jejak.ditutup += 1; },
+        };
+      },
+    };
+  }
+
+  await test('halaman ditangkap 1600x900 @2x sebagai JPEG', async () => {
+    const jejak = {};
+    const hasil = await doiPage.tangkapHalaman('https://doi-monitor.vercel.app/wa?k=T', {
+      ambilBrowser: () => browserHalaman(jejak),
+    });
+    assert.strictEqual(hasil.mimetype, 'image/jpeg');
+    assert.strictEqual(hasil.nama, 'doi-harian.jpg');
+    assert.deepStrictEqual(jejak.viewport, { width: 1600, height: 900, deviceScaleFactor: 2 });
+    assert.strictEqual(jejak.tembakan.type, 'jpeg');
+    assert.strictEqual(jejak.tembakan.quality, 92);
+    assert.strictEqual(jejak.goto.waitUntil, 'networkidle0');
+    assert.ok(jejak.url.endsWith('bare=1'), jejak.url);
+    assert.ok(/halaman 1600x900 @2x/.test(hasil.cara));
+  });
+
+  await test('halaman baru dibuka, dan SELALU ditutup kembali', async () => {
+    const jejak = {};
+    await doiPage.tangkapHalaman('https://x.id/wa?k=T', { ambilBrowser: () => browserHalaman(jejak) });
+    assert.strictEqual(jejak.dibuka, 1, 'halaman BARU, bukan halaman WhatsApp Web');
+    assert.strictEqual(jejak.ditutup, 1);
+
+    // Juga ditutup ketika gagal - tanpa ini tab menumpuk tiap hari sampai
+    // browsernya mati kehabisan memori, dan WhatsApp ikut putus.
+    const jejak2 = {};
+    await assert.rejects(() => doiPage.tangkapHalaman('https://x.id/wa?k=T', {
+      ambilBrowser: () => browserHalaman(jejak2, { penandaAda: false }),
+    }));
+    assert.strictEqual(jejak2.ditutup, 1, 'page.close() wajib ada di finally');
+  });
+
+  await test('penanda siap ditunggu; bila tak muncul, GAGAL - bukan poster kosong', async () => {
+    const jejak = {};
+    await assert.rejects(
+      () => doiPage.tangkapHalaman('https://x.id/wa?k=T', {
+        ambilBrowser: () => browserHalaman(jejak, { penandaAda: false }),
+      }),
+      (err) => {
+        assert.ok(/penanda siap/i.test(err.message), err.message);
+        assert.ok(/doiselector hapus/.test(err.message), 'sebutkan cara mematikannya dari Telegram');
+        return true;
+      }
+    );
+    assert.strictEqual(jejak.selector, '[data-siap="1"]');
+    assert.ok(!jejak.tembakan, 'jangan sekali-kali menangkap layar halaman yang belum siap');
+  });
+
+  await test('penungguan penanda boleh dimatikan dengan sengaja', async () => {
+    const jejak = {};
+    const hasil = await doiPage.tangkapHalaman('https://x.id/wa?k=T', {
+      ambilBrowser: () => browserHalaman(jejak, { penandaAda: false }),
+      selector: '',
+    });
+    assert.ok(hasil.buffer.length > 0);
+    assert.strictEqual(jejak.selector, undefined, 'tidak menunggu apa pun');
+  });
+
+  await test('Chrome belum siap: pesannya menyebut WhatsApp, bukan galat mentah', async () => {
+    await assert.rejects(
+      () => doiPage.tangkapHalaman('https://x.id/wa?k=T', { ambilBrowser: () => null }),
+      /WhatsApp .*ready|Chrome belum tersedia/i
+    );
+  });
+
+  await test('penjadwal memakai jalur halaman dan mengirim gambar lalu teks', async () => {
+    const jejak = {};
+    const { sched, terkirim } = doiSetup({
+      doi_enabled: '1',
+      doi_url: 'https://doi-monitor.vercel.app/wa?k=T',
+      doi_groups: 'DOI@g.us',
+      doi_pic: JSON.stringify([{ nama: 'Ibu Sandra', nomor: '6285773479551' }]),
+    });
+    // Browser disuntikkan lewat WhatsApp palsu, persis seperti di produksi.
+    sched.wa.browser = () => browserHalaman(jejak);
+    sched.penangkap = doiPage.tangkapHalaman;
+    const hasil = await sched.runOnce();
+    assert.strictEqual(hasil.status, 'sent', hasil.reason);
+    assert.strictEqual(terkirim.length, 2);
+    assert.strictEqual(terkirim[0].jenis, 'gambar');
+    assert.strictEqual(terkirim[0].mimetype, 'image/jpeg');
+    assert.strictEqual(terkirim[1].jenis, 'teks');
+    assert.strictEqual(jejak.ditutup, 1);
+    assert.ok(/halaman/.test(hasil.cara), hasil.cara);
+  });
+
+  await test('ukuran & ketajaman halaman bisa diubah dari Telegram', () => {
+    const { sched } = doiSetup({ doi_url: 'https://x.id/wa?k=T' });
+    assert.ok(/1440/.test(sched.setOpsi('lebar', '1440')));
+    assert.ok(/810/.test(sched.setOpsi('tinggi', '810')));
+    const pesan = sched.setOpsi('skala', '1');
+    assert.ok(/1440x810/.test(pesan), pesan);
+    assert.throws(() => sched.setOpsi('skala', '5'), /1, 2, atau 3/);
+    assert.throws(() => sched.setOpsi('tinggi', '10'), /240 - 4000/);
+  });
+
+  await test('/doiselector bisa diganti, direset, dan dimatikan', () => {
+    const { sched } = doiSetup({ doi_url: 'https://x.id/wa?k=T' });
+    sched.setOpsi('selector', '#poster');
+    assert.strictEqual(sched.opsi().selector, '#poster');
+    sched.setOpsi('selector', 'reset');
+    assert.strictEqual(sched.opsi().selector, doiPage.SELECTOR_BAWAAN);
+    const pesan = sched.setOpsi('selector', 'hapus');
+    assert.ok(/risiko poster/i.test(pesan), pesan);
+    assert.strictEqual(sched.opsi().selector, '');
+  });
+
+  await test('/doiurl menyebut mode baru dan tetap menyamarkan token', () => {
+    const { sched } = doiSetup({});
+    const pesan = sched.setOpsi('url', 'https://doi-monitor.vercel.app/wa?k=RAHASIA');
+    assert.ok(!pesan.includes('RAHASIA'), pesan);
+    assert.ok(/TANGKAP LAYAR HALAMAN/.test(pesan), pesan);
+    assert.ok(/bare=1/.test(pesan), 'beri tahu bahwa bare=1 ditambahkan');
+    assert.strictEqual(sched.opsi().mode, 'halaman');
+  });
+
+  await test('/doistatus menyebut cara dan penanda pada mode halaman', () => {
+    const { sched } = doiSetup({ doi_url: 'https://x.id/wa?k=RAHASIA', doi_groups: 'DOI@g.us' });
+    const teks = sched.ringkasanStatus();
+    assert.ok(/tangkap layar halaman 1600x900 @2x = 3200x1800 JPG/.test(teks), teks);
+    assert.ok(/Penanda siap: \[data-siap="1"\]/.test(teks), teks);
+    assert.ok(!teks.includes('RAHASIA'));
+  });
+
+  await test('jalur halaman tidak pernah menavigasi halaman WhatsApp Web', () => {
+    const kode = fs.readFileSync(path.join(__dirname, '..', 'src', 'doi-page.js'), 'utf8');
+    assert.ok(/browser\.newPage\(\)/.test(kode), 'wajib membuka halaman sendiri');
+    assert.ok(!/pupPage/.test(kode), 'halaman WhatsApp Web tidak boleh disentuh sama sekali');
+    assert.ok(/finally\s*\{[\s\S]*page\.close\(\)/.test(kode), 'page.close() wajib di finally');
   });
 
   /* ---- pemisahan tujuan ikut mengenal jalur DOI ---- */
