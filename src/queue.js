@@ -6,10 +6,26 @@ const logger = require('./logger').scope('QUEUE');
  * Antrean serial: satu pekerjaan dijalankan pada satu waktu, dengan jeda
  * minimum antar pekerjaan. Mencegah pengiriman WhatsApp secara paralel.
  */
+/**
+ * Batas waktu SATU pekerjaan.
+ *
+ * Tanpa ini, `await item.task()` menunggu selamanya. Satu pengiriman WhatsApp
+ * yang menggantung (promise-nya tidak pernah selesai — terjadi saat build
+ * WhatsApp Web tidak cocok dengan whatsapp-web.js) membekukan SELURUH antrean:
+ * penerusan Telegram, laporan stok, peringatan lock, semuanya ikut berhenti
+ * diam-diam tanpa satu baris log pun. Lebih baik satu pekerjaan gagal dengan
+ * pesan jelas daripada semuanya mati tanpa jejak.
+ *
+ * 2 menit: cukup longgar untuk unggah gambar beberapa ratus KB di jaringan
+ * lambat, cukup ketat supaya kemacetan ketahuan pada percobaan pertama.
+ */
+const BATAS_TUGAS_MS = 120000;
+
 class MessageQueue {
-  constructor({ delayMs = 3000, maxRetries = 2 } = {}) {
+  constructor({ delayMs = 3000, maxRetries = 2, taskTimeoutMs = BATAS_TUGAS_MS } = {}) {
     this.delayMs = Math.max(0, delayMs);
     this.maxRetries = maxRetries;
+    this.taskTimeoutMs = Math.max(1000, Number(taskTimeoutMs) || BATAS_TUGAS_MS);
     this.items = [];
     this.running = false;
     this.lastRunAt = 0;
@@ -50,7 +66,7 @@ class MessageQueue {
         const item = this.items.shift();
         this.lastRunAt = Date.now();
         try {
-          const result = await item.task();
+          const result = await denganBatasWaktu(item.task, this.taskTimeoutMs, item.label);
           this.stats.done += 1;
           logger.debug(`Selesai: ${item.label}`);
           item.resolve(result);
@@ -73,6 +89,28 @@ class MessageQueue {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Jalankan `task`, menyerah setelah `ms`.
+ *
+ * Pekerjaan aslinya TIDAK bisa dibatalkan — Promise JavaScript memang tidak
+ * mengenal pembatalan — jadi ia mungkin masih berjalan di latar. Yang kita
+ * hentikan adalah PENUNGGUANNYA, supaya antrean bisa lanjut.
+ */
+function denganBatasWaktu(task, ms, label) {
+  return new Promise((resolve, reject) => {
+    let selesai = false;
+    const timer = setTimeout(() => {
+      if (selesai) return;
+      selesai = true;
+      reject(new Error(`tidak selesai dalam ${Math.round(ms / 1000)} dtk (${label}) - antrean dilanjutkan`));
+    }, ms);
+    Promise.resolve()
+      .then(() => task())
+      .then((hasil) => { if (!selesai) { selesai = true; clearTimeout(timer); resolve(hasil); } })
+      .catch((err) => { if (!selesai) { selesai = true; clearTimeout(timer); reject(err); } });
+  });
+}
 
 module.exports = MessageQueue;
 module.exports.sleep = sleep;
