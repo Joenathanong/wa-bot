@@ -253,6 +253,7 @@ class TelegramService {
           '_gambar, lalu disusul teks pendamping berisi mention PIC._',
           '/doi        - ambil & kirim sekarang',
           '/doistatus  - pengaturan, PIC, jadwal berikutnya',
+          '/wafix      - pasang ulang + uji jalur kirim gambar WhatsApp',
           '/doion, /doioff - nyalakan / matikan pengiriman berkala',
           '/doijam 8,13,16 - jam kirim (0-23, pisah koma)',
           '/doipic <Nama>  - PIC DOI (boleh >1, pisah koma)',
@@ -302,6 +303,49 @@ class TelegramService {
         }
         const v = this.admin.statusView();
         await this.bot.sendMessage(chatId, v.text, { reply_markup: { inline_keyboard: v.keyboard } });
+        return true;
+      }
+
+      // Pasang ulang + uji tambalan pengiriman media WhatsApp Web.
+      // WhatsApp Web sewaktu-waktu mengganti internalnya (yang terakhir:
+      // isBlobEqual hilang dari modul yang dipakai consolidate), dan bundel
+      // barunya bisa termuat tanpa aplikasi ini dijalankan ulang. Perintah ini
+      // memasang tambalannya lagi lalu melaporkan langkah mana yang sehat -
+      // tanpa mengirim apa pun ke siapa pun.
+      case '/wafix': {
+        if (!this.config.isAdmin(userId)) {
+          await this.bot.sendMessage(chatId, require('./admin').DENIED);
+          return true;
+        }
+        if (!this.wa || !this.wa.isReady()) {
+          await this.bot.sendMessage(chatId, 'WhatsApp belum siap - coba lagi setelah tersambung.');
+          return true;
+        }
+        const hasil = await this.wa._pasangTambalanMedia(true);
+        if (!hasil) {
+          await this.bot.sendMessage(chatId, 'Tambalan tidak bisa dipasang - halaman WhatsApp Web tidak terjangkau.');
+          return true;
+        }
+        const u = hasil.uji || {};
+        const baik = !u.gagalDi;
+        await this.bot.sendMessage(chatId, [
+          baik ? '✅ Jalur media SEHAT (sampai sebelum unggah)' : `❌ Masih gagal di: ${u.gagalDi}`,
+          '',
+          'Langkah:',
+          ...(u.langkah || ['(tidak ada)']).map((x) => '  ' + x),
+          '',
+          'Tambalan:',
+          ...((hasil.lapor && hasil.lapor.lapis) || ['(tidak ada)']).map((x) => '  ' + x),
+          hasil.lapor && hasil.lapor.dipasang && hasil.lapor.dipasang.length
+            ? '  modul: ' + hasil.lapor.dipasang.join(', ')
+            : null,
+          hasil.lapor && hasil.lapor.jejak && hasil.lapor.jejak.length
+            ? '  jejak: ' + hasil.lapor.jejak.join(', ')
+            : null,
+          u.catatan && u.catatan.consolidateGagal
+            ? `\nconsolidate asli: ${u.catatan.consolidateGagal}\njalur cadangan: ${u.catatan.cadangan || '-'}`
+            : null,
+        ].filter((x) => x !== null).join('\n'));
         return true;
       }
 

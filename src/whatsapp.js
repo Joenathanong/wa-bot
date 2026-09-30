@@ -4,6 +4,7 @@ const EventEmitter = require('events');
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger').scope('WA');
+const { pasangTambalanMedia } = require('./wa-media-fix');
 
 /**
  * Lokasi Chrome/Edge yang lazim dipakai, sebagai cadangan bila Chromium
@@ -251,6 +252,10 @@ class WhatsAppService extends EventEmitter {
       } catch (e) { this.info = null; }
       const who = this.info && this.info.wid ? this.info.wid._serialized : '(tidak diketahui)';
       logger.info('WhatsApp ready - tersambung sebagai', who);
+      // Tambal jalur kirim media SEBELUM pengiriman pertama (lihat
+      // src/wa-media-fix.js). Diuji sekalian supaya log startup langsung
+      // memberi tahu apakah consolidate sudah sehat.
+      await this._pasangTambalanMedia(true);
       this.emit('ready');
     });
 
@@ -1033,6 +1038,10 @@ class WhatsAppService extends EventEmitter {
     if (!chatId) throw new Error('Target WhatsApp Group belum dipilih (buka /groups)');
     if (!gambar || !gambar.buffer || gambar.buffer.length === 0) throw new Error('Gambar kosong');
 
+    // Halaman bisa dimuat ulang (recover) tanpa event ready yang kita tangkap;
+    // pemasangannya idempoten, jadi murah untuk diulang di sini.
+    await this._pasangTambalanMedia(false);
+
     let MessageMedia = null;
     try { ({ MessageMedia } = require('whatsapp-web.js')); } catch (e) { /* ditangani di bawah */ }
     const isi = Buffer.from(gambar.buffer).toString('base64');
@@ -1089,6 +1098,22 @@ class WhatsAppService extends EventEmitter {
    *
    * @param {string} chatId group yang dituju - untuk menguji pengambilan chat-nya juga
    */
+  /**
+   * Pasang tambalan pengiriman media di halaman WhatsApp Web.
+   * Aman dipanggil berulang kali; kegagalannya tidak pernah menggagalkan kirim.
+   *
+   * @param {boolean} uji jalankan uji PNG 1x1 dan catat hasilnya di log
+   */
+  async _pasangTambalanMedia(uji = false) {
+    if (!this.client || !this.client.pupPage) return null;
+    try {
+      return await pasangTambalanMedia(this.client.pupPage, logger, uji);
+    } catch (e) {
+      logger.warn('Tambalan media WA dilewati: ' + ((e && e.message) || e));
+      return null;
+    }
+  }
+
   async _probeMedia(chatId = null) {
     if (!this.client || !this.client.pupPage) return;
     const PNG_1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
