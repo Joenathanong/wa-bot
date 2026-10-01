@@ -330,14 +330,31 @@ const SKRIP = function () {
           jj.grup = String(grup);
           jj.adaMedia = String(!!(options && options.media));
           jj.gmSebelum = String(!!(chat && chat.groupMetadata));
-          if (grup && !(chat && chat.groupMetadata)) {
+          // Hitung peserta DULU. Metadata yang "ada" belum berarti berisi:
+          // group DOI punya groupMetadata dengan peserta NOL, dan di situlah
+          // getValidatedSender kehabisan tempat mencari pengirim. Jadi syarat
+          // muat ulang bukan "metadata tidak ada", tapi "peserta kosong".
+          const hitungPeserta = () => {
+            try {
+              const gm = chat && chat.groupMetadata;
+              if (!gm) return -1;
+              const ps = gm.participants;
+              if (!ps) return 0;
+              if (typeof ps.length === 'number') return ps.length;
+              if (ps._models && typeof ps._models.length === 'number') return ps._models.length;
+              if (typeof ps.getModelsArray === 'function') return ps.getModelsArray().length;
+              return 0;
+            } catch (e) { return -2; }
+          };
+          jj.pesertaSebelum = String(hitungPeserta());
+          if (grup && hitungPeserta() <= 0) {
             const sid = (chat.id && (chat.id._serialized || String(chat.id))) || null;
             try {
               await window.require('WAWebGroupQueryJob')
                 .queryAndUpdateGroupMetadataById({ id: sid });
               jj.muat = 'queryAndUpdate OK';
             } catch (e) { jj.muat = 'queryAndUpdate GAGAL - ' + String((e && e.message) || e).slice(0, 80); }
-            if (!chat.groupMetadata) {
+            if (hitungPeserta() <= 0) {
               try {
                 const C = window.require('WAWebCollections');
                 const GM = C.GroupMetadata || C.WAWebGroupMetadataCollection;
@@ -345,6 +362,7 @@ const SKRIP = function () {
                 jj.muat2 = 'update OK';
               } catch (e) { jj.muat2 = 'update GAGAL - ' + String((e && e.message) || e).slice(0, 80); }
             }
+            jj.pesertaSesudah = String(hitungPeserta());
           }
           jj.gmSesudah = String(!!(chat && chat.groupMetadata));
           jj.lidMode = String(chat && chat.groupMetadata && chat.groupMetadata.isLidAddressingMode);
