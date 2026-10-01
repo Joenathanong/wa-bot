@@ -3,42 +3,35 @@
 /**
  * Tambalan pengiriman media WhatsApp Web.
  *
- * MASALAH YANG DITAMBAL
- * ---------------------
- * Probe langkah-demi-langkah (whatsapp.js `_probeMedia`) sudah membuktikan
- * bahwa jalur penyiapan media sehat sampai langkah keempat:
+ * RIWAYAT MASALAH (semua sudah dibuktikan lewat probe di halaman, bukan dugaan)
+ * ---------------------------------------------------------------------------
+ * 1. `consolidate: GAGAL - u.isBlobEqual is not a function`
+ *    WhatsApp Web menghapus `isBlobEqual` dari modul yang dipakai
+ *    `MediaObject.consolidate`. DITAMBAL (lapis 2).
+ * 2. `castToV4: unexpected mmsv3 type image`
+ *    Setelah consolidate lewat, langkah berikutnya di processMediaData -
+ *    `shouldUseMediaCache(castToV4(mediaObject.type))` - melempar. castToV4
+ *    tidak lagi menerima nama tipe v3 seperti "image". DITAMBAL (lapis 3).
+ * 3. `Data passed to getter must include an id property (it's how we memoize)`
+ *    Ini galat yang akhirnya sampai ke pemakai, dan SATU frame tumpukan saja
+ *    yang terbawa. Belum jelas di langkah mana. BELUM ditambal - lapis 4
+ *    memasang perekam tumpukan penuh supaya langkahnya ketahuan.
  *
- *   createFromData: OK
- *   waitForPrep: OK            <- filehash terisi
- *   getOrCreateMediaObject: OK
- *   msgToMediaType: OK
- *   consolidate: GAGAL - u.isBlobEqual is not a function
+ * Tidak ada perbaikan di hulu untuk nomor 1 dan 2: `pedroslopez/whatsapp-web.js`
+ * cabang main memuat kode yang sama.
  *
- * Artinya WhatsApp Web menghapus/mengganti nama fungsi `isBlobEqual` dari
- * modul yang dipakai `MediaObject.consolidate`. Kode whatsapp-web.js
- * (src/util/Injected/Utils.js, `processMediaData`) memanggil consolidate tanpa
- * pelindung, jadi seluruh pengiriman gambar gagal. Tidak ada perbaikan di
- * hulu: `pedroslopez/whatsapp-web.js` cabang main memuat kode yang sama.
- *
- * CARA MENAMBAL - dua lapis, tanpa menyentuh node_modules
- * ------------------------------------------------------
- * 1. TAMBAL AKAR: cari modul yang dipakai consolidate dan pasang kembali
- *    `isBlobEqual` yang hilang. Kalau berhasil, consolidate jalan normal -
- *    ini yang paling kita inginkan.
- * 2. JARING PENGAMAN: bungkus `getOrCreateMediaObject` supaya objek media yang
- *    dikembalikannya punya `consolidate` sendiri yang menangkap galat lalu
- *    menyetel medannya langsung. Jadi kalau lapis 1 tidak kena sasaran,
- *    unggahan tetap diteruskan alih-alih melempar.
- *
- * Keduanya idempoten dan hanya menambah properti - tidak ada yang dihapus.
- * Semua dijalankan di dalam halaman, jadi `npm install` tidak menghapusnya.
+ * Semua tambalan dipasang DI DALAM halaman dan hanya menambah/membungkus -
+ * tidak ada yang dihapus, dan `npm install` tidak menghapusnya.
  */
 
 const SKRIP = function () {
   const lap = { lapis: [] };
-  window.__waFix = window.__waFix || {};
+  // Catatan disetel ulang tiap pemasangan - dan pemasangan dijalankan persis
+  // sebelum tiap pengiriman. Jadi tumpukan yang terbaca setelah gagal selalu
+  // dari percobaan ITU, bukan sisa percobaan sebelumnya.
+  window.__waFix = {};
 
-  // --- ambil peta modul WhatsApp Web -------------------------------------
+  // --- peta modul WhatsApp Web -------------------------------------------
   let peta = null;
   try { peta = window.require('__debug').modulesMap; } catch (e) { /* coba cara lain */ }
   if (!peta) { try { peta = window.__debug && window.__debug.modulesMap; } catch (e) { /* menyerah */ } }
@@ -59,10 +52,31 @@ const SKRIP = function () {
     } catch (e) { return null; }
   };
 
+  // Pembungkus aman: panggil yang asli, tangkap galatnya, pakai nilai cadangan.
+  // Dipakai untuk titik-titik yang MELEMPAR padahal hasilnya cuma optimasi.
+  const bungkus = (namaModul, namaFn, cadangan, label) => {
+    try {
+      const mod = window.require(namaModul);
+      if (!mod || typeof mod[namaFn] !== 'function') { lap.lapis.push(label + ': TIDAK ADA'); return; }
+      if (mod['__waFix_' + namaFn]) { lap.lapis.push(label + ': sudah ada'); return; }
+      const asli = mod[namaFn];
+      mod[namaFn] = function () {
+        try { return asli.apply(this, arguments); }
+        catch (e) {
+          window.__waFix[namaFn + 'Gagal'] = String((e && e.message) || e);
+          return cadangan;
+        }
+      };
+      mod['__waFix_' + namaFn] = true;
+      lap.lapis.push(label + ': OK');
+    } catch (e) {
+      lap.lapis.push(label + ': GAGAL - ' + String((e && e.message) || e));
+    }
+  };
+
   // --- siapa yang masih punya isBlobEqual? -------------------------------
-  // Membaca sumber SEMUA modul berarti men-string-kan puluhan MB kode, dan itu
-  // membekukan halaman beberapa detik. consolidate hampir pasti ada di modul
-  // media, jadi yang itu dulu; pindai seluruhnya hanya kalau tidak ketemu.
+  // Membaca sumber SEMUA modul berarti men-string-kan puluhan MB kode. Modul
+  // media dulu; pindai seluruhnya hanya kalau tidak ketemu.
   const penyedia = [];
   const pemakai = [];
   const pindai = (saring) => {
@@ -87,10 +101,11 @@ const SKRIP = function () {
   lap.penyedia = penyedia.slice(0, 8);
   lap.pemakai = pemakai.map((p) => p.nama).slice(0, 8);
 
-  // --- implementasi pengganti -------------------------------------------
-  // "Apakah dua blob ini blob yang sama?" - identitas objek, lalu filehash.
-  // Sengaja konservatif: kalau tidak yakin, jawab TIDAK sama, sehingga
-  // consolidate mengambil jalur "simpan yang baru" dan bukan melewatkannya.
+  // --- LAPIS 1: pasang kembali isBlobEqual di modul yang dirujuk ----------
+  // Catatan: pada bundel 1 Okt 2026 lapis ini TIDAK menemukan sasaran
+  // (pemakai: 0 dari 14.326 modul) - sumber factory-nya tidak terbaca lewat
+  // modulesMap. Dibiarkan karena murah dan bisa kena di bundel lain; yang
+  // benar-benar menyelamatkan pengiriman adalah lapis 2.
   const isBlobEqual = function (a, b) {
     try {
       if (a === b) return true;
@@ -101,35 +116,27 @@ const SKRIP = function () {
       return false;
     } catch (e) { return false; }
   };
-
-  // --- LAPIS 1: pasang isBlobEqual di modul yang dirujuk consolidate -----
   const dipasang = [];
   const jejak = [];
   for (const p of pemakai) {
     try {
-      // nama variabel di depan .isBlobEqual (mis. "u" pada "u.isBlobEqual")
       const vars = new Set();
       const re = /([A-Za-z_$][\w$]*)\s*\.\s*isBlobEqual/g;
       let m;
       while ((m = re.exec(p.s)) !== null) vars.add(m[1]);
       for (const v of vars) {
-        // cari "v = <req>("NamaModul")" di mana pun dalam factory
         const reAsal = new RegExp('\\b' + v.replace(/\$/g, '\\$') + '\\s*=\\s*[A-Za-z_$][\\w$]*\\(\\s*[\'"]([\\w$]+)[\'"]\\s*\\)');
         const asal = reAsal.exec(p.s);
         jejak.push(p.nama + ':' + v + '->' + (asal ? asal[1] : '?'));
         const kandidat = asal ? [asal[1]] : [];
         if (!asal) {
-          // Tidak ketemu lewat variabel: coba modul yang di-require di factory
-          // ini - TAPI hanya yang sudah terinisialisasi. window.require() pada
-          // modul yang belum jalan akan menjalankan factory-nya, dan memaksa
-          // modul WhatsApp Web sembarangan hidup lebih berisiko daripada
-          // tambalan ini sendiri.
+          // Hanya modul yang SUDAH terinisialisasi: window.require() pada modul
+          // yang belum jalan akan menjalankan factory-nya, dan memaksa modul
+          // WhatsApp Web sembarangan hidup lebih berisiko daripada tambalan ini.
           const reAll = /[A-Za-z_$][\w$]*\(\s*['"]([A-Z][\w$]*)['"]\s*\)/g;
           let x; const set = new Set();
           while ((x = reAll.exec(p.s)) !== null) set.add(x[1]);
-          for (const n of set) {
-            if (peta && peta[n] && peta[n].isInitialized) kandidat.push(n);
-          }
+          for (const n of set) { if (peta && peta[n] && peta[n].isInitialized) kandidat.push(n); }
         }
         for (const nama of kandidat.slice(0, 40)) {
           try {
@@ -152,9 +159,12 @@ const SKRIP = function () {
   }
   lap.jejak = jejak.slice(0, 8);
   lap.dipasang = dipasang.slice(0, 12);
-  lap.lapis.push('polyfill: ' + dipasang.length + ' modul');
+  lap.lapis.push('polyfill isBlobEqual: ' + dipasang.length + ' modul');
 
   // --- LAPIS 2: bungkus getOrCreateMediaObject --------------------------
+  // consolidate() cuma menggabungkan data hasil prep ke objek media. Kalau
+  // melempar, medannya disetel langsung - uploadMedia setelahnya membaca objek
+  // media itu, bukan nilai kembalian consolidate.
   try {
     const MS = window.require('WAWebMediaStorage');
     if (MS && typeof MS.getOrCreateMediaObject === 'function' && !MS.__waFixConsolidate) {
@@ -170,9 +180,6 @@ const SKRIP = function () {
                 try { return cons(json); }
                 catch (e) {
                   window.__waFix.consolidateGagal = String((e && e.message) || e);
-                  // Jalur cadangan: setel medannya langsung. consolidate cuma
-                  // menggabungkan data hasil prep ke objek media - yang dibaca
-                  // uploadMedia setelahnya adalah objek media itu sendiri.
                   try {
                     if (typeof mo.set === 'function') { mo.set(json); window.__waFix.cadangan = 'set()'; return undefined; }
                   } catch (e2) { /* coba assign */ }
@@ -198,27 +205,97 @@ const SKRIP = function () {
     lap.lapis.push('bungkus getOrCreateMediaObject: GAGAL - ' + String((e && e.message) || e));
   }
 
+  // --- LAPIS 3: castToV4 + shouldUseMediaCache jangan melempar ----------
+  // processMediaData memanggil:
+  //   shouldUseMediaCache(castToV4(mediaObject.type))
+  // Hasilnya HANYA menentukan apakah blob-nya ditaruh di cache memori -
+  // optimasi, bukan syarat kirim. castToV4 kini menolak "image", jadi seluruh
+  // pengiriman gagal karena sebuah optimasi. Dibikin tidak melempar:
+  // castToV4 -> null, shouldUseMediaCache -> false (lewati cache).
+  bungkus('WAWebMmsMediaTypes', 'castToV4', null, 'bungkus castToV4');
+  bungkus('WAWebMediaDataUtils', 'shouldUseMediaCache', false, 'bungkus shouldUseMediaCache');
+
+  // --- LAPIS 4: rekam tumpukan penuh ------------------------------------
+  // Galat yang sampai ke pemakai - "Data passed to getter must include an id
+  // property" - hanya membawa SATU frame lewat Puppeteer, jadi langkah yang
+  // melempar tidak pernah terlihat. Dua fungsi dibungkus supaya tumpukan
+  // penuhnya tersimpan, dan supaya jelas kegagalannya di penyiapan media
+  // (processMediaData) atau sesudahnya (pembuatan & pengiriman pesan):
+  const rekam = (nama) => {
+    try {
+      if (!window.WWebJS || typeof window.WWebJS[nama] !== 'function') {
+        lap.lapis.push('rekam ' + nama + ': TIDAK ADA'); return;
+      }
+      if (window.WWebJS['__waFixRekam_' + nama]) {
+        lap.lapis.push('rekam ' + nama + ': sudah ada'); return;
+      }
+      const asli = window.WWebJS[nama];
+      window.WWebJS[nama] = async function () {
+        try {
+          const hasil = await asli.apply(this, arguments);
+          window.__waFix[nama] = 'OK';
+          return hasil;
+        } catch (e) {
+          window.__waFix[nama] = 'GAGAL';
+          window.__waFix[nama + 'Galat'] = String((e && e.message) || e);
+          window.__waFix[nama + 'Tumpukan'] = String((e && e.stack) || '(tanpa tumpukan)').slice(0, 1500);
+          throw e;
+        }
+      };
+      window.WWebJS['__waFixRekam_' + nama] = true;
+      lap.lapis.push('rekam ' + nama + ': OK');
+    } catch (e) {
+      lap.lapis.push('rekam ' + nama + ': GAGAL - ' + String((e && e.message) || e));
+    }
+  };
+  rekam('processMediaData');
+  rekam('sendMessage');
+
   return lap;
 };
 
 /**
- * Uji tambalan dengan PNG 1x1 - sampai sebelum unggahan.
- * Mengembalikan laporan langkah, sama bentuknya dengan probe di whatsapp.js.
+ * Uji tambalan dengan PNG 1x1 - sampai sebelum unggahan - sekalian mengumpulkan
+ * kosakata tipe media yang MASIH diterima castToV4, supaya kalau tambalan
+ * "jangan melempar" tidak cukup, nilai yang benar bisa dipakai.
  */
 const UJI = async function (data) {
-  const out = { langkah: [] };
+  const out = { langkah: [], diag: {} };
   const coba = async (nama, fn) => {
     try { const v = await fn(); out.langkah.push(nama + ': OK'); return v; }
     catch (e) { out.langkah.push(nama + ': GAGAL - ' + String((e && e.message) || e)); out.gagalDi = nama; throw e; }
   };
+  let mo = null; let md = null;
   try {
     const OpaqueData = window.require('WAWebMediaOpaqueData');
     const file = window.WWebJS.mediaInfoToFile({ data, mimetype: 'image/png', filename: 'uji.png' });
     const od = await coba('createFromData', () => OpaqueData.createFromData(file, 'image/png'));
-    const md = await coba('waitForPrep', () => window.require('WAWebPrepRawMedia').prepRawMedia(od, {}).waitForPrep());
-    const mo = await coba('getOrCreateMediaObject', () => window.require('WAWebMediaStorage').getOrCreateMediaObject(md.filehash));
+    md = await coba('waitForPrep', () => window.require('WAWebPrepRawMedia').prepRawMedia(od, {}).waitForPrep());
+    mo = await coba('getOrCreateMediaObject', () => window.require('WAWebMediaStorage').getOrCreateMediaObject(md.filehash));
+    const mt = await coba('msgToMediaType', () => window.require('WAWebMmsMediaTypes')
+      .msgToMediaType({ type: md.type, isGif: md.isGif, isNewsletter: false }));
+    out.diag.mediaType = JSON.stringify(mt);
     await coba('consolidate', () => mo.consolidate(md.toJSON()));
-  } catch (e) { /* sudah tercatat */ }
+    await coba('castToV4+shouldUseMediaCache', () => window.require('WAWebMediaDataUtils')
+      .shouldUseMediaCache(window.require('WAWebMmsMediaTypes').castToV4(mo.type)));
+  } catch (e) { /* sudah tercatat di out.langkah */ }
+
+  // Kosakata tipe: mana yang diterima castToV4 sekarang?
+  try {
+    const T = window.require('WAWebMmsMediaTypes');
+    out.diag.tipeMo = mo ? String(mo.type) : null;
+    out.diag.tipeMd = md ? String(md.type) : null;
+    out.diag.mmsKunci = Object.keys(T).slice(0, 30);
+    const asliCast = T.__waFix_castToV4 ? null : T.castToV4;
+    const uji = ['image', 'video', 'audio', 'ptt', 'document', 'sticker', 'gif', 'IMAGE', 'image/jpeg'];
+    out.diag.castToV4 = uji.map((t) => {
+      try {
+        const v = (asliCast || T.castToV4)(t);
+        return t + '=' + String(v);
+      } catch (e) { return t + '!' + String((e && e.message) || e).slice(0, 50); }
+    });
+  } catch (e) { out.diag.kosakata = 'gagal: ' + String((e && e.message) || e); }
+
   out.catatan = window.__waFix || null;
   return out;
 };
@@ -247,7 +324,7 @@ async function pasangTambalanMedia(page, logger, uji = false) {
     try {
       hasil.uji = await page.evaluate(UJI, PNG_1X1);
       const baik = !hasil.uji.gagalDi;
-      logger[baik ? 'info' : 'error']('Uji media WA: ' + JSON.stringify(hasil.uji).slice(0, 900));
+      logger[baik ? 'info' : 'error']('Uji media WA: ' + JSON.stringify(hasil.uji).slice(0, 1800));
     } catch (e) {
       hasil.uji = { galat: String((e && e.message) || e) };
       logger.warn('Uji media WA tidak bisa dijalankan: ' + ((e && e.message) || e));
@@ -256,4 +333,22 @@ async function pasangTambalanMedia(page, logger, uji = false) {
   return hasil;
 }
 
-module.exports = { pasangTambalanMedia };
+/**
+ * Baca catatan tambalan dari halaman - termasuk tumpukan penuh kegagalan
+ * processMediaData yang terakhir. Dipanggil SETELAH pengiriman gagal.
+ *
+ * @param {import('puppeteer').Page} page
+ */
+async function bacaCatatanMedia(page) {
+  if (!page) return null;
+  try {
+    return await page.evaluate(() => {
+      try { return JSON.parse(JSON.stringify(window.__waFix || {})); }
+      catch (e) { return { galat: String((e && e.message) || e) }; }
+    });
+  } catch (e) {
+    return { galat: String((e && e.message) || e) };
+  }
+}
+
+module.exports = { pasangTambalanMedia, bacaCatatanMedia };

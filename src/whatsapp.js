@@ -4,7 +4,7 @@ const EventEmitter = require('events');
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger').scope('WA');
-const { pasangTambalanMedia } = require('./wa-media-fix');
+const { pasangTambalanMedia, bacaCatatanMedia } = require('./wa-media-fix');
 
 /**
  * Lokasi Chrome/Edge yang lazim dipakai, sebagai cadangan bila Chromium
@@ -1073,6 +1073,10 @@ class WhatsAppService extends EventEmitter {
       // memberi tahu apakah medannya berganti nama (mis. fileHash) - itu bisa
       // ditambal satu baris - atau penyiapannya memang rusak seluruhnya.
       await this._probeMedia(chatId).catch(() => { /* probe tidak boleh menutupi galat asli */ });
+      // Galat yang sampai ke sini hanya membawa SATU frame tumpukan. Tumpukan
+      // penuhnya direkam di dalam halaman oleh lapis 4 wa-media-fix.js - baca
+      // sekarang, selagi masih yang terakhir.
+      await this._catatanTambalan().catch(() => { /* jangan menutupi galat asli */ });
       if (isContextLost(err)) {
         logger.error('Pengiriman gambar gagal karena halaman WhatsApp Web terlepas - memulihkan koneksi.');
         this.recover('gagal kirim gambar: halaman terlepas').catch(() => { /* sudah dicatat */ });
@@ -1112,6 +1116,14 @@ class WhatsAppService extends EventEmitter {
       logger.warn('Tambalan media WA dilewati: ' + ((e && e.message) || e));
       return null;
     }
+  }
+
+  /** Catat isi window.__waFix - termasuk tumpukan penuh kegagalan terakhir. */
+  async _catatanTambalan() {
+    if (!this.client || !this.client.pupPage) return null;
+    const c = await bacaCatatanMedia(this.client.pupPage);
+    if (c) logger.error('CATATAN tambalan media: ' + JSON.stringify(c).slice(0, 2400));
+    return c;
   }
 
   async _probeMedia(chatId = null) {
