@@ -13,9 +13,13 @@
  *    `shouldUseMediaCache(castToV4(mediaObject.type))` - melempar. castToV4
  *    tidak lagi menerima nama tipe v3 seperti "image". DITAMBAL (lapis 3).
  * 3. `Data passed to getter must include an id property (it's how we memoize)`
- *    Ini galat yang akhirnya sampai ke pemakai, dan SATU frame tumpukan saja
- *    yang terbawa. Belum jelas di langkah mana. BELUM ditambal - lapis 4
- *    memasang perekam tumpukan penuh supaya langkahnya ketahuan.
+ *    Galat yang akhirnya sampai ke pemakai. Hanya SATU frame tumpukan yang
+ *    terbawa lewat Puppeteer, jadi lapis 4 memasang perekam tumpukan penuh di
+ *    dalam halaman. Hasilnya: `processMediaData: OK` - medianya sudah
+ *    terunggah - dan yang melempar adalah pembuatan model pesan, di
+ *    getValidatedSender -> getSender. Pengirimnya undefined. DITAMBAL (lapis
+ *    5): data media dibersihkan dari medan identitas pesan sebelum
+ *    whatsapp-web.js menebarnya ke atas id/from/to.
  *
  * Tidak ada perbaikan di hulu untuk nomor 1 dan 2: `pedroslopez/whatsapp-web.js`
  * cabang main memuat kode yang sama.
@@ -248,8 +252,93 @@ const SKRIP = function () {
       lap.lapis.push('rekam ' + nama + ': GAGAL - ' + String((e && e.message) || e));
     }
   };
-  rekam('processMediaData');
   rekam('sendMessage');
+
+  // --- LAPIS 5: jangan biarkan data media menimpa identitas pesan --------
+  //
+  // Tumpukan penuh (1 Okt 2026) menunjukkan medianya SUDAH terunggah
+  // (processMediaData: OK) dan yang melempar adalah pembuatan model pesannya:
+  //
+  //   new t -> constructor -> initialize -> getValidatedSender -> getSender
+  //   -> getter memoized: "must include an id property ... but got undefined"
+  //
+  // getSender membaca pengirim pesan, dan dapat undefined. Lihat cara
+  // whatsapp-web.js menyusun pesannya (Injected/Utils.js ~470):
+  //
+  //   const message = { ...options, id: newMsgKey, from: from, to: chat.id,
+  //                     ..., ...mediaOptions,
+  //                     ...(mediaOptions.toJSON ? mediaOptions.toJSON() : {}) }
+  //
+  // mediaOptions ditebar SESUDAH id/from/to. mediaOptions adalah model hasil
+  // prepRawMedia - model yang sekarang ikut membawa medan-medan pesan. Satu
+  // medan `from: undefined` di sana cukup untuk menimpa pengirim yang benar,
+  // dan pengiriman teks tidak kena karena tidak ada mediaOptions untuk
+  // menebarnya. Jadi: buang medan identitas pesan dan semua medan bernilai
+  // undefined dari yang ditebar - keduanya mustahil berisi informasi media.
+  const IDENTITAS = ['id', 'from', 'to', 'author', 'participant', 'self', 'ack', 'local', 'isNewMsg', 't'];
+  const bersihkan = (obj, label) => {
+    const dibuang = [];
+    let kunci = [];
+    try { kunci = Object.keys(obj); } catch (e) { return dibuang; }
+    for (const k of kunci) {
+      let buang = IDENTITAS.indexOf(k) >= 0;
+      if (!buang) { try { buang = obj[k] === undefined; } catch (e) { buang = false; } }
+      if (buang) {
+        try { delete obj[k]; dibuang.push(label + '.' + k); } catch (e) { /* terkunci */ }
+      }
+    }
+    return dibuang;
+  };
+  try {
+    if (!window.WWebJS || typeof window.WWebJS.processMediaData !== 'function') {
+      lap.lapis.push('bersihkan processMediaData: TIDAK ADA');
+    } else if (window.WWebJS.__waFixBersih) {
+      lap.lapis.push('bersihkan processMediaData: sudah ada');
+    } else {
+      const asli = window.WWebJS.processMediaData;
+      window.WWebJS.processMediaData = async function () {
+        let hasil;
+        try {
+          hasil = await asli.apply(this, arguments);
+          window.__waFix.processMediaData = 'OK';
+        } catch (e) {
+          window.__waFix.processMediaData = 'GAGAL';
+          window.__waFix.processMediaDataGalat = String((e && e.message) || e);
+          window.__waFix.processMediaDataTumpukan = String((e && e.stack) || '(tanpa tumpukan)').slice(0, 1500);
+          throw e;
+        }
+        // Catat APA yang ditemukan sebelum dibuang - ini yang membuktikan atau
+        // mematahkan dugaan di atas, di jalur kirim yang sungguhan.
+        try {
+          const j = (hasil && typeof hasil.toJSON === 'function') ? hasil.toJSON() : null;
+          window.__waFix.identitasModel = IDENTITAS
+            .filter((k) => Object.prototype.hasOwnProperty.call(hasil, k))
+            .map((k) => k + '=' + String(hasil[k]));
+          window.__waFix.identitasJson = j
+            ? IDENTITAS.filter((k) => k in j).map((k) => k + '=' + String(j[k]))
+            : null;
+          window.__waFix.kunciJson = j ? Object.keys(j).slice(0, 50) : null;
+        } catch (e) { window.__waFix.catatGagal = String((e && e.message) || e); }
+        // Lalu bersihkan: model yang ditebar, dan hasil toJSON()-nya.
+        try {
+          window.__waFix.dibuang = bersihkan(hasil, 'model').slice(0, 40);
+          if (typeof hasil.toJSON === 'function') {
+            const asliToJSON = hasil.toJSON.bind(hasil);
+            hasil.toJSON = function () {
+              const j = asliToJSON();
+              window.__waFix.dibuangJson = bersihkan(j, 'json').slice(0, 40);
+              return j;
+            };
+          }
+        } catch (e) { window.__waFix.bersihGagal = String((e && e.message) || e); }
+        return hasil;
+      };
+      window.WWebJS.__waFixBersih = true;
+      lap.lapis.push('bersihkan processMediaData: OK');
+    }
+  } catch (e) {
+    lap.lapis.push('bersihkan processMediaData: GAGAL - ' + String((e && e.message) || e));
+  }
 
   return lap;
 };
