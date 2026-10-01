@@ -25,11 +25,22 @@
  *    data media tidak membawa satu pun medan identitas pesan. Pencatatnya
  *    dipertahankan (lapis 5), penghapusnya dicabut.
  *
- *    Giliran berikutnya diperiksa di titik yang tepat: objek `message` yang
- *    sudah jadi, persis sebelum diserahkan ke WhatsApp Web (lapis 6). Di situ
- *    terlihat nilai from/to/author/participant yang sebenarnya - dan karena
- *    jejaknya menyimpan pesan TEKS yang berhasil juga, perbedaan antara yang
- *    berhasil dan yang gagal bisa dibaca berdampingan.
+ *    Lapis 6 lalu memeriksa objek `message` yang sudah jadi, dan jejaknya
+ *    memberi petunjuk yang jelas:
+ *
+ *      from: 628567126259@c.us    <- nomor telepon
+ *      lid:  66173282562288@lid   <- akun ini PUNYA LID
+ *      lidMode: undefined         <- bukan false: groupMetadata-nya kosong
+ *      author: undefined          <- diisi, tetap gagal
+ *
+ *    Mengisi author tidak menolong. Tapi `lidMode: undefined` itu yang
+ *    menarik: whatsapp-web.js memilih pengirim dengan
+ *    `chat.groupMetadata && chat.groupMetadata.isLidAddressingMode`, jadi
+ *    groupMetadata yang belum dimuat membuatnya memakai nomor telepon tanpa
+ *    peringatan - walau group-nya mungkin beralamat LID. DICOBA (lapis 7):
+ *    groupMetadata dimuat lebih dulu, supaya whatsapp-web.js memilih
+ *    pengirimnya sendiri dengan benar, dan nilai isLidAddressingMode yang
+ *    sesungguhnya tercatat.
  *
  * Tidak ada perbaikan di hulu untuk nomor 1 dan 2: `pedroslopez/whatsapp-web.js`
  * cabang main memuat kode yang sama.
@@ -262,9 +273,88 @@ const SKRIP = function () {
       lap.lapis.push('rekam ' + nama + ': GAGAL - ' + String((e && e.message) || e));
     }
   };
-  rekam('sendMessage');
+  // Jejak pesan TIDAK disetel ulang tiap pemasangan: pesan teks yang berhasil
+  // harus tetap tersimpan agar bisa dibandingkan dengan yang gagal.
+  window.__waJejakPesan = window.__waJejakPesan || [];
 
-  // --- LAPIS 5: jangan biarkan data media menimpa identitas pesan --------
+  // --- LAPIS 7: biarkan whatsapp-web.js melihat mode alamat group ---------
+  //
+  // Jejak pesan (1 Okt 2026) memperlihatkan ini:
+  //
+  //   from: 628567126259@c.us          <- nomor telepon
+  //   lid:  66173282562288@lid         <- akun ini PUNYA LID
+  //   lidMode: undefined               <- bukan false: groupMetadata-nya kosong
+  //
+  // Lihat cara whatsapp-web.js memilih pengirim (Injected/Utils.js ~425):
+  //
+  //   from = chat.groupMetadata && chat.groupMetadata.isLidAddressingMode
+  //            ? lidUser : meUser
+  //
+  // Kalau groupMetadata belum dimuat, syaratnya falsy dan nomor telepon yang
+  // dipakai - TANPA peringatan, walau group-nya sebenarnya beralamat LID.
+  // Pesan media memvalidasi pengirimnya (getValidatedSender), pesan teks tidak;
+  // itu menjelaskan kenapa teks ke group yang sama selalu lolos.
+  //
+  // Jadi di sini groupMetadata dimuat lebih dulu - bukan menebak pengirim yang
+  // benar, tapi membuat whatsapp-web.js bisa memilihnya sendiri dengan benar.
+  // Nilai isLidAddressingMode yang sesungguhnya ikut dicatat: kalau ternyata
+  // false, dugaan LID ini mati dan kita tahu seketika.
+  try {
+    if (!window.WWebJS || typeof window.WWebJS.sendMessage !== 'function') {
+      lap.lapis.push('muat groupMetadata: TIDAK ADA');
+    } else if (window.WWebJS.__waFixKirim) {
+      lap.lapis.push('muat groupMetadata: sudah ada');
+    } else {
+      const asliKirim = window.WWebJS.sendMessage;
+      window.WWebJS.sendMessage = async function (chat, content, options) {
+        const jj = { tahap: 'pra-kirim' };
+        try {
+          const grup = !!(chat && chat.id && typeof chat.id.isGroup === 'function' && chat.id.isGroup());
+          jj.grup = String(grup);
+          jj.adaMedia = String(!!(options && options.media));
+          jj.gmSebelum = String(!!(chat && chat.groupMetadata));
+          if (grup && !(chat && chat.groupMetadata)) {
+            const sid = (chat.id && (chat.id._serialized || String(chat.id))) || null;
+            try {
+              await window.require('WAWebGroupQueryJob')
+                .queryAndUpdateGroupMetadataById({ id: sid });
+              jj.muat = 'queryAndUpdate OK';
+            } catch (e) { jj.muat = 'queryAndUpdate GAGAL - ' + String((e && e.message) || e).slice(0, 80); }
+            if (!chat.groupMetadata) {
+              try {
+                const C = window.require('WAWebCollections');
+                const GM = C.GroupMetadata || C.WAWebGroupMetadataCollection;
+                await GM.update(window.require('WAWebWidFactory').createWid(sid));
+                jj.muat2 = 'update OK';
+              } catch (e) { jj.muat2 = 'update GAGAL - ' + String((e && e.message) || e).slice(0, 80); }
+            }
+          }
+          jj.gmSesudah = String(!!(chat && chat.groupMetadata));
+          jj.lidMode = String(chat && chat.groupMetadata && chat.groupMetadata.isLidAddressingMode);
+        } catch (e) { jj.galat = String((e && e.message) || e); }
+        try {
+          window.__waJejakPesan.push(jj);
+          while (window.__waJejakPesan.length > 6) window.__waJejakPesan.shift();
+        } catch (e) { /* jejak tidak boleh menggagalkan kirim */ }
+        try {
+          const hasil = await asliKirim.apply(this, arguments);
+          window.__waFix.sendMessage = 'OK';
+          return hasil;
+        } catch (e) {
+          window.__waFix.sendMessage = 'GAGAL';
+          window.__waFix.sendMessageGalat = String((e && e.message) || e);
+          window.__waFix.sendMessageTumpukan = String((e && e.stack) || '(tanpa tumpukan)').slice(0, 1200);
+          throw e;
+        }
+      };
+      window.WWebJS.__waFixKirim = true;
+      lap.lapis.push('muat groupMetadata: OK');
+    }
+  } catch (e) {
+    lap.lapis.push('muat groupMetadata: GAGAL - ' + String((e && e.message) || e));
+  }
+
+  // --- LAPIS 5: rekam isi data media (pencatat saja) ---------------------
   //
   // Tumpukan penuh (1 Okt 2026) menunjukkan medianya SUDAH terunggah
   // (processMediaData: OK) dan yang melempar adalah pembuatan model pesannya:
@@ -349,7 +439,6 @@ const SKRIP = function () {
   // Cabang STATUS di whatsapp-web.js memang menyetel `author: participant`;
   // cabang chat biasa tidak. Kalau WhatsApp Web kini mewajibkannya untuk
   // pesan media, di sinilah ketahuan.
-  window.__waJejakPesan = window.__waJejakPesan || [];
   try {
     const SM = window.require('WAWebSendMsgChatAction');
     if (!SM || typeof SM.addAndSendMsgToChat !== 'function') {
@@ -376,15 +465,19 @@ const SKRIP = function () {
           jj.lidMode = String(chat && chat.groupMetadata && chat.groupMetadata.isLidAddressingMode);
           jj.grup = String(!!(chat && chat.id && typeof chat.id.isGroup === 'function' && chat.id.isGroup()));
 
-          // a. pengirim kosong
-          if (message && !message.from) {
-            const ganti = lidUser || meUser;
-            if (ganti) { message.from = ganti; jj.perbaikan = (jj.perbaikan || '') + 'from<-' + sb(ganti) + ' '; }
-          }
-          // b. grup tanpa author
-          if (message && !message.author && jj.grup === 'true') {
-            const ganti = (message.id && message.id.participant) || message.from;
-            if (ganti) { message.author = ganti; jj.perbaikan = (jj.perbaikan || '') + 'author<-' + sb(ganti) + ' '; }
+          // Perbaikan HANYA untuk pesan media. Pesan teks ke group yang sama
+          // terbukti berhasil apa adanya - jalur yang sudah jalan tidak disentuh.
+          if (jj.tipe !== 'chat') {
+            // a. pengirim kosong
+            if (message && !message.from) {
+              const ganti = lidUser || meUser;
+              if (ganti) { message.from = ganti; jj.perbaikan = (jj.perbaikan || '') + 'from<-' + sb(ganti) + ' '; }
+            }
+            // b. grup tanpa author
+            if (message && !message.author && jj.grup === 'true') {
+              const ganti = (message.id && message.id.participant) || message.from;
+              if (ganti) { message.author = ganti; jj.perbaikan = (jj.perbaikan || '') + 'author<-' + sb(ganti) + ' '; }
+            }
           }
         } catch (e) { jj.galat = String((e && e.message) || e); }
         try {
