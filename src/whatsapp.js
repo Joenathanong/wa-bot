@@ -1122,7 +1122,11 @@ class WhatsAppService extends EventEmitter {
   async _catatanTambalan() {
     if (!this.client || !this.client.pupPage) return null;
     const c = await bacaCatatanMedia(this.client.pupPage);
-    if (c) logger.error('CATATAN tambalan media: ' + JSON.stringify(c).slice(0, 2400));
+    if (!c) return c;
+    // Dua baris terpisah: jejak pesan jangan sampai terpotong oleh tumpukan
+    // galat yang panjang - justru jejak itu yang paling menjelaskan.
+    if (c.jejakPesan) logger.error('JEJAK pesan: ' + JSON.stringify(c.jejakPesan).slice(0, 1600));
+    logger.error('CATATAN tambalan media: ' + JSON.stringify(c.fix || c).slice(0, 2000));
     return c;
   }
 

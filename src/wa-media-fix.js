@@ -17,9 +17,19 @@
  *    terbawa lewat Puppeteer, jadi lapis 4 memasang perekam tumpukan penuh di
  *    dalam halaman. Hasilnya: `processMediaData: OK` - medianya sudah
  *    terunggah - dan yang melempar adalah pembuatan model pesan, di
- *    getValidatedSender -> getSender. Pengirimnya undefined. DITAMBAL (lapis
- *    5): data media dibersihkan dari medan identitas pesan sebelum
- *    whatsapp-web.js menebarnya ke atas id/from/to.
+ *    getValidatedSender -> getSender. Pengirimnya undefined. BELUM ditambal.
+ *
+ *    Dugaan pertama - data media menimpa medan id/from/to pesan karena
+ *    whatsapp-web.js menebarnya SESUDAH medan itu - sudah DIPATAHKAN oleh
+ *    pencatatnya sendiri: identitasModel dan identitasJson keduanya kosong,
+ *    data media tidak membawa satu pun medan identitas pesan. Pencatatnya
+ *    dipertahankan (lapis 5), penghapusnya dicabut.
+ *
+ *    Giliran berikutnya diperiksa di titik yang tepat: objek `message` yang
+ *    sudah jadi, persis sebelum diserahkan ke WhatsApp Web (lapis 6). Di situ
+ *    terlihat nilai from/to/author/participant yang sebenarnya - dan karena
+ *    jejaknya menyimpan pesan TEKS yang berhasil juga, perbedaan antara yang
+ *    berhasil dan yang gagal bisa dibaca berdampingan.
  *
  * Tidak ada perbaikan di hulu untuk nomor 1 dan 2: `pedroslopez/whatsapp-web.js`
  * cabang main memuat kode yang sama.
@@ -276,24 +286,11 @@ const SKRIP = function () {
   // menebarnya. Jadi: buang medan identitas pesan dan semua medan bernilai
   // undefined dari yang ditebar - keduanya mustahil berisi informasi media.
   const IDENTITAS = ['id', 'from', 'to', 'author', 'participant', 'self', 'ack', 'local', 'isNewMsg', 't'];
-  const bersihkan = (obj, label) => {
-    const dibuang = [];
-    let kunci = [];
-    try { kunci = Object.keys(obj); } catch (e) { return dibuang; }
-    for (const k of kunci) {
-      let buang = IDENTITAS.indexOf(k) >= 0;
-      if (!buang) { try { buang = obj[k] === undefined; } catch (e) { buang = false; } }
-      if (buang) {
-        try { delete obj[k]; dibuang.push(label + '.' + k); } catch (e) { /* terkunci */ }
-      }
-    }
-    return dibuang;
-  };
   try {
     if (!window.WWebJS || typeof window.WWebJS.processMediaData !== 'function') {
-      lap.lapis.push('bersihkan processMediaData: TIDAK ADA');
-    } else if (window.WWebJS.__waFixBersih) {
-      lap.lapis.push('bersihkan processMediaData: sudah ada');
+      lap.lapis.push('rekam data media: TIDAK ADA');
+    } else if (window.WWebJS.__waFixRekamMedia) {
+      lap.lapis.push('rekam data media: sudah ada');
     } else {
       const asli = window.WWebJS.processMediaData;
       window.WWebJS.processMediaData = async function () {
@@ -319,25 +316,88 @@ const SKRIP = function () {
             : null;
           window.__waFix.kunciJson = j ? Object.keys(j).slice(0, 50) : null;
         } catch (e) { window.__waFix.catatGagal = String((e && e.message) || e); }
-        // Lalu bersihkan: model yang ditebar, dan hasil toJSON()-nya.
-        try {
-          window.__waFix.dibuang = bersihkan(hasil, 'model').slice(0, 40);
-          if (typeof hasil.toJSON === 'function') {
-            const asliToJSON = hasil.toJSON.bind(hasil);
-            hasil.toJSON = function () {
-              const j = asliToJSON();
-              window.__waFix.dibuangJson = bersihkan(j, 'json').slice(0, 40);
-              return j;
-            };
-          }
-        } catch (e) { window.__waFix.bersihGagal = String((e && e.message) || e); }
+        // TIDAK ADA yang dibuang lagi. Pencatat di atas membuktikan dugaannya
+        // salah - identitasModel dan identitasJson keduanya kosong - jadi
+        // penghapusnya dicabut. Penghapus itu juga terbukti menyentuh medan
+        // yang bukan urusannya (model.parent, model.collection): justru
+        // menambah variabel baru, bukan mengurangi.
         return hasil;
       };
-      window.WWebJS.__waFixBersih = true;
-      lap.lapis.push('bersihkan processMediaData: OK');
+      window.WWebJS.__waFixRekamMedia = true;
+      lap.lapis.push('rekam data media: OK');
     }
   } catch (e) {
-    lap.lapis.push('bersihkan processMediaData: GAGAL - ' + String((e && e.message) || e));
+    lap.lapis.push('rekam data media: GAGAL - ' + String((e && e.message) || e));
+  }
+
+  // --- LAPIS 6: periksa objek pesan tepat sebelum diserahkan -------------
+  //
+  // whatsapp-web.js menyusun `message` lalu memanggil
+  //   addAndSendMsgToChat(chat, message)
+  // dan di dalam situlah model pesannya dibangun dan getSender melempar. Ini
+  // satu-satunya titik di mana objek pesan yang SUDAH JADI bisa dilihat.
+  //
+  // Dicatat (bukan ditebak): from, to, author, participant, tipe, dan siapa
+  // meUser/lidUser-nya. Jejaknya TIDAK disetel ulang tiap pemasangan, jadi
+  // pesan teks yang berhasil ikut tersimpan - dan perbedaannya dengan pesan
+  // gambar yang gagal bisa dibandingkan langsung.
+  //
+  // Lalu dua perbaikan, masing-masing hanya kalau medannya memang kosong dan
+  // masing-masing dicatat, supaya kalau berhasil kita tahu yang mana:
+  //   a. message.from kosong  -> isi dari meUser/lidUser
+  //   b. grup tanpa author    -> isi dari id.participant
+  // Cabang STATUS di whatsapp-web.js memang menyetel `author: participant`;
+  // cabang chat biasa tidak. Kalau WhatsApp Web kini mewajibkannya untuk
+  // pesan media, di sinilah ketahuan.
+  window.__waJejakPesan = window.__waJejakPesan || [];
+  try {
+    const SM = window.require('WAWebSendMsgChatAction');
+    if (!SM || typeof SM.addAndSendMsgToChat !== 'function') {
+      lap.lapis.push('periksa pesan: TIDAK ADA');
+    } else if (SM.__waFixPeriksa) {
+      lap.lapis.push('periksa pesan: sudah ada');
+    } else {
+      const asli = SM.addAndSendMsgToChat;
+      SM.addAndSendMsgToChat = function (chat, message) {
+        const jj = {};
+        try {
+          const MU = window.require('WAWebUserPrefsMeUser');
+          const meUser = MU.getMaybeMePnUser ? MU.getMaybeMePnUser() : undefined;
+          const lidUser = MU.getMaybeMeLidUser ? MU.getMaybeMeLidUser() : undefined;
+          const sb = (v) => { try { return v == null ? String(v) : (v._serialized || String(v)); } catch (e) { return '?'; } };
+          jj.tipe = String(message && message.type);
+          jj.from = sb(message && message.from);
+          jj.to = sb(message && message.to);
+          jj.author = sb(message && message.author);
+          jj.idPartisipan = sb(message && message.id && message.id.participant);
+          jj.idRemote = sb(message && message.id && message.id.remote);
+          jj.me = sb(meUser);
+          jj.lid = sb(lidUser);
+          jj.lidMode = String(chat && chat.groupMetadata && chat.groupMetadata.isLidAddressingMode);
+          jj.grup = String(!!(chat && chat.id && typeof chat.id.isGroup === 'function' && chat.id.isGroup()));
+
+          // a. pengirim kosong
+          if (message && !message.from) {
+            const ganti = lidUser || meUser;
+            if (ganti) { message.from = ganti; jj.perbaikan = (jj.perbaikan || '') + 'from<-' + sb(ganti) + ' '; }
+          }
+          // b. grup tanpa author
+          if (message && !message.author && jj.grup === 'true') {
+            const ganti = (message.id && message.id.participant) || message.from;
+            if (ganti) { message.author = ganti; jj.perbaikan = (jj.perbaikan || '') + 'author<-' + sb(ganti) + ' '; }
+          }
+        } catch (e) { jj.galat = String((e && e.message) || e); }
+        try {
+          window.__waJejakPesan.push(jj);
+          while (window.__waJejakPesan.length > 4) window.__waJejakPesan.shift();
+        } catch (e) { /* jejak tidak boleh menggagalkan kirim */ }
+        return asli.apply(this, arguments);
+      };
+      SM.__waFixPeriksa = true;
+      lap.lapis.push('periksa pesan: OK');
+    }
+  } catch (e) {
+    lap.lapis.push('periksa pesan: GAGAL - ' + String((e && e.message) || e));
   }
 
   return lap;
@@ -432,8 +492,12 @@ async function bacaCatatanMedia(page) {
   if (!page) return null;
   try {
     return await page.evaluate(() => {
-      try { return JSON.parse(JSON.stringify(window.__waFix || {})); }
-      catch (e) { return { galat: String((e && e.message) || e) }; }
+      try {
+        return JSON.parse(JSON.stringify({
+          jejakPesan: window.__waJejakPesan || [],
+          fix: window.__waFix || {},
+        }));
+      } catch (e) { return { galat: String((e && e.message) || e) }; }
     });
   } catch (e) {
     return { galat: String((e && e.message) || e) };
