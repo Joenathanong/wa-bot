@@ -42,6 +42,23 @@
  *    pengirimnya sendiri dengan benar, dan nilai isLidAddressingMode yang
  *    sesungguhnya tercatat.
  *
+ *    Hasilnya memperlihatkan bedanya bukan teks-vs-media, tapi GROUP-vs-GROUP:
+ *
+ *      group "Testing"  lidMode=true       from=...@lid    BERHASIL (teks)
+ *      group DOI        lidMode=undefined  from=...@c.us   GAGAL  (gambar)
+ *
+ *    groupMetadata KEDUANYA termuat. Jadi medan isLidAddressingMode memang
+ *    tidak ada di group DOI, dan whatsapp-web.js jatuh ke nomor telepon karena
+ *    syaratnya falsy. Lapis 6 kini mencoba pengirim LID langsung untuk media ke
+ *    group semacam itu, dan lapis 7 membongkar isi groupMetadata-nya (nama
+ *    medan + alamat peserta) supaya ketahuan apakah group itu memang beralamat
+ *    LID dengan medan yang berganti nama.
+ *
+ *    CATATAN: lapis 6 menyusun ulang kunci pesan, jadi pencarian balik
+ *    whatsapp-web.js (Msg.get(newMsgKey)) tidak akan menemukannya dan
+ *    client.sendMessage mengembalikan undefined walau pengirimannya BERHASIL.
+ *    Itu sudah ditangani (Client.js menjaganya, tujuanNyata menerima null).
+ *
  * Tidak ada perbaikan di hulu untuk nomor 1 dan 2: `pedroslopez/whatsapp-web.js`
  * cabang main memuat kode yang sama.
  *
@@ -331,6 +348,22 @@ const SKRIP = function () {
           }
           jj.gmSesudah = String(!!(chat && chat.groupMetadata));
           jj.lidMode = String(chat && chat.groupMetadata && chat.groupMetadata.isLidAddressingMode);
+          // groupMetadata-nya TERMUAT tapi isLidAddressingMode undefined. Jadi
+          // medannya memang tidak ada di group ini, bukan metadatanya kosong.
+          // Dibongkar isinya: nama medan yang ada, dan alamat peserta - kalau
+          // pesertanya @lid, group ini beralamat LID walau medan itu hilang.
+          try {
+            const gm = chat && chat.groupMetadata;
+            const sz = (gm && typeof gm.serialize === 'function') ? gm.serialize() : null;
+            if (sz) {
+              jj.gmKunci = Object.keys(sz).filter((k) => k !== 'participants').slice(0, 30);
+              jj.mode = String(sz.addressingMode);
+              const ps = sz.participants || [];
+              jj.jmlPeserta = String(ps.length);
+              jj.peserta = ps.slice(0, 3)
+                .map((x) => String((x && x.id && (x.id._serialized || x.id)) || '?'));
+            }
+          } catch (e) { jj.gmBongkarGagal = String((e && e.message) || e).slice(0, 80); }
         } catch (e) { jj.galat = String((e && e.message) || e); }
         try {
           window.__waJejakPesan.push(jj);
@@ -465,19 +498,48 @@ const SKRIP = function () {
           jj.lidMode = String(chat && chat.groupMetadata && chat.groupMetadata.isLidAddressingMode);
           jj.grup = String(!!(chat && chat.id && typeof chat.id.isGroup === 'function' && chat.id.isGroup()));
 
-          // Perbaikan HANYA untuk pesan media. Pesan teks ke group yang sama
-          // terbukti berhasil apa adanya - jalur yang sudah jalan tidak disentuh.
-          if (jj.tipe !== 'chat') {
-            // a. pengirim kosong
-            if (message && !message.from) {
-              const ganti = lidUser || meUser;
-              if (ganti) { message.from = ganti; jj.perbaikan = (jj.perbaikan || '') + 'from<-' + sb(ganti) + ' '; }
+          // Perbaikan HANYA untuk pesan media ke group. Pesan teks terbukti
+          // berhasil apa adanya - jalur yang sudah jalan tidak disentuh.
+          //
+          // Perbandingan dua pesan dalam satu jejak (1 Okt 2026) memperlihatkan
+          // bedanya bukan teks-vs-media, tapi GROUP-vs-GROUP:
+          //
+          //   group "Testing"  lidMode=true       from=66173282562288@lid   BERHASIL
+          //   group DOI        lidMode=undefined  from=628567126259@c.us    GAGAL
+          //
+          // Padahal groupMetadata keduanya termuat (gmSesudah=true). Jadi
+          // medan isLidAddressingMode memang TIDAK ADA di group DOI, dan
+          // whatsapp-web.js jatuh ke nomor telepon karena syaratnya falsy.
+          //
+          // Akun ini punya LID dan sudah terbukti bisa mengirim sebagai LID.
+          // Jadi di sini pengirim LID dicoba langsung: kunci pesan disusun ulang
+          // dengan from/participant/author LID. Kalau berhasil, medan yang
+          // hilang itulah sebabnya; kalau gagal dengan galat lain, dugaan LID
+          // mati dan jejaknya menunjukkan kenapa.
+          if (jj.tipe !== 'chat' && jj.grup === 'true' && lidUser && jj.lidMode !== 'true') {
+            try {
+              const MK = window.require('WAWebMsgKey');
+              const WF = window.require('WAWebWidFactory');
+              const pesertaLid = WF.asUserWidOrThrow(lidUser);
+              const idLama = message.id;
+              message.id = new MK({
+                from: lidUser,
+                to: message.to || (chat && chat.id),
+                id: idLama && idLama.id,
+                participant: pesertaLid,
+                selfDir: 'out',
+              });
+              message.from = lidUser;
+              message.author = pesertaLid;
+              jj.perbaikan = 'LID dipaksa: from/author/id <- ' + sb(lidUser);
+            } catch (e) {
+              jj.lidGagal = String((e && e.message) || e).slice(0, 120);
             }
-            // b. grup tanpa author
-            if (message && !message.author && jj.grup === 'true') {
-              const ganti = (message.id && message.id.participant) || message.from;
-              if (ganti) { message.author = ganti; jj.perbaikan = (jj.perbaikan || '') + 'author<-' + sb(ganti) + ' '; }
-            }
+          }
+          // Kalau pengirimnya masih kosong sama sekali, isi - apa pun tipenya.
+          if (message && !message.from) {
+            const ganti = lidUser || meUser;
+            if (ganti) { message.from = ganti; jj.perbaikan = (jj.perbaikan || '') + ' from<-' + sb(ganti); }
           }
         } catch (e) { jj.galat = String((e && e.message) || e); }
         try {
